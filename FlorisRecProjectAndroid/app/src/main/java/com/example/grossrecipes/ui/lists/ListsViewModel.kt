@@ -5,7 +5,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.grossrecipes.data.ConnectivityObserver
-import com.example.grossrecipes.data.DeviceIdProvider
 import com.example.grossrecipes.data.ListsRepository
 import com.example.grossrecipes.data.Session
 import com.example.grossrecipes.data.SessionManager
@@ -26,7 +25,6 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         database.listDao(),
         database.listItemDao(),
         database.outboxEventDao(),
-        DeviceIdProvider(application),
         SyncStateManager(application),
         sessionManager
     )
@@ -122,10 +120,18 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.setCheckedSectionExpandedLocalOnly(listId, expanded) }
     }
 
-    fun updateSharedWith(listId: String, sharedWith: List<String>) {
+    fun shareList(listId: String, username: String) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->
-                repository.updateSharedWith(serverUrl, accessToken, listId, sharedWith)
+                repository.shareList(serverUrl, accessToken, listId, username)
+            }
+        }
+    }
+
+    fun unshareList(listId: String, username: String) {
+        viewModelScope.launch {
+            withLoggedInSession { serverUrl, accessToken ->
+                repository.unshareList(serverUrl, accessToken, listId, username)
             }
         }
     }
@@ -138,30 +144,9 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun moveList(listId: String, direction: Int) {
-        viewModelScope.launch {
-            val current = lists.value
-            val index = current.indexOfFirst { it.id == listId }
-            val newIndex = index + direction
-            if (index < 0 || newIndex < 0 || newIndex >= current.size) return@launch
-            val reordered = current.toMutableList().apply {
-                val tmp = this[index]
-                this[index] = this[newIndex]
-                this[newIndex] = tmp
-            }
-            withLoggedInSession { serverUrl, accessToken ->
-                repository.updateSortOrder(serverUrl, accessToken, reordered.map { it.id })
-            }
-        }
-    }
-
-    /** Called after a drag-and-drop reorder finishes, with the full new order. */
+    /** Called after a drag-and-drop reorder finishes, with the full new order. Purely local - never synced. */
     fun reorderLists(orderedListIds: List<String>) {
-        viewModelScope.launch {
-            withLoggedInSession { serverUrl, accessToken ->
-                repository.updateSortOrder(serverUrl, accessToken, orderedListIds)
-            }
-        }
+        viewModelScope.launch { repository.updateSortOrder(orderedListIds) }
     }
 
     private suspend fun withLoggedInSession(block: suspend (serverUrl: String, accessToken: String) -> Unit) {

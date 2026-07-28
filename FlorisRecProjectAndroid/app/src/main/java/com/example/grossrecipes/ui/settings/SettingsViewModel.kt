@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.grossrecipes.data.ConnectivityObserver
-import com.example.grossrecipes.data.DeviceIdProvider
 import com.example.grossrecipes.data.ListsRepository
 import com.example.grossrecipes.data.Session
 import com.example.grossrecipes.data.SessionManager
@@ -24,7 +23,6 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
         database.listDao(),
         database.listItemDao(),
         database.outboxEventDao(),
-        DeviceIdProvider(application),
         SyncStateManager(application),
         sessionManager
     )

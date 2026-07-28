@@ -180,7 +180,8 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
         ShareDialog(
             list = shareDialogList,
             onDismiss = { shareDialogListId = null },
-            onUpdateSharedWith = { newSharedWith -> viewModel.updateSharedWith(shareDialogList.id, newSharedWith) },
+            onShare = { username -> viewModel.shareList(shareDialogList.id, username) },
+            onUnshare = { username -> viewModel.unshareList(shareDialogList.id, username) },
             onSharedExternally = { viewModel.markSharedExternally(shareDialogList.id) }
         )
     }

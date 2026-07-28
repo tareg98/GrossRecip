@@ -4,8 +4,8 @@ import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import com.example.grossrecipes.data.eventGson
+import com.sirolf2009.grossrecipes.event.Event
 
 /**
  * The local "outbox": every event created on this phone that hasn't been
@@ -14,33 +14,25 @@ import com.google.gson.reflect.TypeToken
  * pushed successfully, it's deleted from here (the server now owns the
  * permanent record of it).
  *
- * [seq] is a local-only auto-increment used purely to guarantee we push
- * events in the exact order they were created on this phone (wall-clock
- * [timestamp] alone could tie if two events happen in the same millisecond).
- * [id] is the event's own id and is what actually gets sent to the server.
- *
- * [payload] is stored as a JSON string under the hood (Room can't store a
- * Map column directly) - see [OutboxPayloadConverter].
+ * [seq] is the only thing that's really "ours" - a local auto-increment used
+ * both to push events in the exact order they were created on this phone,
+ * and as the row's own key for deleting it once synced (unlike our old
+ * generic envelope, gross-recipes-common's [Event] has no single universal
+ * "this event's own id" field, so [seq] is what we key on locally instead).
+ * [event] is stored as JSON under the hood (Room can't store an arbitrary
+ * interface-typed column directly) - see [EventConverter].
  */
 @Entity(tableName = "outbox_events")
-@TypeConverters(OutboxPayloadConverter::class)
+@TypeConverters(EventConverter::class)
 data class OutboxEventEntity(
     @PrimaryKey(autoGenerate = true) val seq: Long = 0,
-    val id: String,
-    val type: String,
-    val entityId: String,
-    val payload: Map<String, String?>,
-    val timestamp: Long,
-    val deviceId: String
+    val event: Event
 )
 
-class OutboxPayloadConverter {
-    private val gson = Gson()
-    private val mapType = object : TypeToken<Map<String, String?>>() {}.type
+class EventConverter {
+    @TypeConverter
+    fun fromEvent(event: Event): String = eventGson.toJson(event, Event::class.java)
 
     @TypeConverter
-    fun fromPayload(payload: Map<String, String?>): String = gson.toJson(payload)
-
-    @TypeConverter
-    fun toPayload(json: String): Map<String, String?> = gson.fromJson(json, mapType) ?: emptyMap()
+    fun toEvent(json: String): Event = eventGson.fromJson(json, Event::class.java)
 }

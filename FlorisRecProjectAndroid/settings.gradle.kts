@@ -19,6 +19,11 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven {
+            name = "reposiliteRepositoryReleases"
+            url = uri("http://sirolf2009.com:8080/releases")
+            isAllowInsecureProtocol = true
+        }
     }
 }
 

@@ -55,7 +55,8 @@ import com.example.grossrecipes.ui.theme.Surface
 fun ShareDialog(
     list: GroceryList,
     onDismiss: () -> Unit,
-    onUpdateSharedWith: (List<String>) -> Unit,
+    onShare: (String) -> Unit,
+    onUnshare: (String) -> Unit,
     onSharedExternally: () -> Unit
 ) {
     var username by remember { mutableStateOf("") }
@@ -81,7 +82,7 @@ fun ShareDialog(
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                     keyboardActions = KeyboardActions(onDone = {
                         if (username.isNotBlank()) {
-                            onUpdateSharedWith(list.sharedWith + username.trim())
+                            onShare(username.trim())
                             username = ""
                         }
                     }),
@@ -91,7 +92,7 @@ fun ShareDialog(
                 Button(
                     onClick = {
                         if (username.isNotBlank()) {
-                            onUpdateSharedWith(list.sharedWith + username.trim())
+                            onShare(username.trim())
                             username = ""
                         }
                     },
@@ -121,7 +122,7 @@ fun ShareDialog(
                                 tint = Accent2Deep,
                                 modifier = Modifier
                                     .size(14.dp)
-                                    .clickable { onUpdateSharedWith(list.sharedWith - person) }
+                                    .clickable { onUnshare(person) }
                             )
                         }
                     }

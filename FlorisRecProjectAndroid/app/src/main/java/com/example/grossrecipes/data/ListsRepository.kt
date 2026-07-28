@@ -2,10 +2,6 @@ package com.example.grossrecipes.data
 
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
-import com.example.grossrecipes.data.dto.EventEnvelope
-import com.example.grossrecipes.data.dto.EventType
-import com.example.grossrecipes.data.dto.PullEventsResponse
-import com.example.grossrecipes.data.dto.PushEventsRequest
 import com.example.grossrecipes.data.local.ListDao
 import com.example.grossrecipes.data.local.ListEntity
 import com.example.grossrecipes.data.local.ListItemDao
@@ -14,34 +10,50 @@ import com.example.grossrecipes.data.local.OutboxEventDao
 import com.example.grossrecipes.data.local.OutboxEventEntity
 import com.example.grossrecipes.ui.lists.GroceryItem
 import com.example.grossrecipes.ui.lists.GroceryList
+import com.sirolf2009.grossrecipes.event.Event
+import com.sirolf2009.grossrecipes.event.list.ListCreated
+import com.sirolf2009.grossrecipes.event.list.ListDeleted
+import com.sirolf2009.grossrecipes.event.list.ListRecolored
+import com.sirolf2009.grossrecipes.event.list.ListRenamed
+import com.sirolf2009.grossrecipes.event.list.ListShared
+import com.sirolf2009.grossrecipes.event.list.ListSharedExternally
+import com.sirolf2009.grossrecipes.event.list.ListUnshared
+import com.sirolf2009.grossrecipes.event.listItem.ListItemChecked
+import com.sirolf2009.grossrecipes.event.listItem.ListItemCreated
+import com.sirolf2009.grossrecipes.event.listItem.ListItemDeleted
+import com.sirolf2009.grossrecipes.event.listItem.ListItemRenamed
+import com.sirolf2009.grossrecipes.sync.dto.SyncRequest
+import com.sirolf2009.grossrecipes.sync.dto.SyncResponse
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import java.time.ZonedDateTime
 import java.util.UUID
 
 /**
- * Event-sourced, offline-first repository (the design your friend described):
- * every user action becomes an [EventEnvelope] that is (1) applied to the
- * local Room tables immediately, so the UI updates instantly with zero
- * network, and (2) queued in [OutboxEventDao] until the server confirms it.
- * The local tables ([ListEntity]/[ListItemEntity]) are just a "materialized
- * view" - the current snapshot you get by replaying every event applied so
- * far. There's no more per-row synced/existsOnServer flag; a row's sync
- * status is really a question about the outbox, not the row.
+ * Event-sourced, offline-first repository, now built directly on your
+ * friend's gross-recipes-common library instead of our own generic event
+ * shape - every user action becomes one of ITS typed [Event] subclasses
+ * (ListCreated, ListItemChecked, etc.), which is (1) applied to the local
+ * Room tables immediately, so the UI updates instantly with zero network,
+ * and (2) queued in [OutboxEventDao] until the server confirms it. The local
+ * tables ([ListEntity]/[ListItemEntity]) are just a "materialized view" -
+ * the current snapshot you get by replaying every event applied so far.
  *
- * Syncing ([syncPendingChanges]) is always the same two steps regardless of
- * why it's running (first login, reconnect, or right after an action):
- * push whatever's in the outbox, then pull everything that happened
- * elsewhere since our last successful sync and apply it. A brand-new
- * install has a cursor of 0, so its first pull naturally receives the
- * entire history and bootstraps its local database - there's no separate
- * "initial load" code path.
+ * Sort order is deliberately NOT part of any event - see [updateSortOrder].
+ *
+ * Syncing ([syncPendingChanges]) is always the same shape regardless of why
+ * it's running (first login, reconnect, or right after an action): send
+ * whatever's in the outbox plus our last-synced cursor in one call, get back
+ * everything we're missing, apply it, then forget the outbox (it's durable
+ * on the server now). A brand-new install has a cursor of epoch, so its
+ * first sync naturally receives the entire history and bootstraps its local
+ * database - there's no separate "initial load" code path.
  */
 class ListsRepository(
     private val listDao: ListDao,
     private val listItemDao: ListItemDao,
     private val outboxEventDao: OutboxEventDao,
-    private val deviceIdProvider: DeviceIdProvider,
     private val syncStateManager: SyncStateManager,
     private val sessionManager: SessionManager
 ) {
@@ -67,70 +79,79 @@ class ListsRepository(
         color: Color?,
         sharedWithUsername: String
     ): Result<Unit> {
-        val listId = UUID.randomUUID().toString()
-        val sortOrder = listDao.maxSortOrder() + 1
         val owner = sessionManager.currentSession().username
 
-        emit(EventType.LIST_CREATED, listId, mapOf("name" to name, "sortOrder" to sortOrder.toString(), "owner" to owner))
-        if (color != null) {
-            emit(EventType.LIST_COLOR_CHANGED, listId, mapOf("colorHex" to color.toHex()))
-        }
-        if (sharedWithUsername.isNotBlank()) {
-            emit(EventType.LIST_SHARED_WITH_CHANGED, listId, mapOf("sharedWith" to sharedWithUsername))
-        }
+        emit(
+            ListCreated(
+                time = ZonedDateTime.now(),
+                listId = UUID.randomUUID(),
+                name = name,
+                owner = owner,
+                sharedWith = if (sharedWithUsername.isNotBlank()) listOf(sharedWithUsername) else emptyList(),
+                color = color?.toHex()
+            )
+        )
 
         return syncPendingChanges(serverUrl, accessToken)
     }
 
     suspend fun addItem(serverUrl: String, accessToken: String, listId: String, itemName: String): Result<Unit> {
-        val itemId = UUID.randomUUID().toString()
-        emit(EventType.ITEM_ADDED, itemId, mapOf("listId" to listId, "name" to itemName))
+        emit(ListItemCreated(ZonedDateTime.now(), UUID.fromString(listId), UUID.randomUUID(), itemName))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
     suspend fun setChecked(serverUrl: String, accessToken: String, itemId: String, checked: Boolean): Result<Unit> {
-        emit(EventType.ITEM_CHECKED_CHANGED, itemId, mapOf("checked" to checked.toString()))
+        val item = listItemDao.getById(itemId) ?: return Result.failure(Exception("Item not found locally: $itemId"))
+        emit(ListItemChecked(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId), checked))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
     suspend fun deleteList(serverUrl: String, accessToken: String, listId: String): Result<Unit> {
-        emit(EventType.LIST_DELETED, listId, emptyMap())
+        emit(ListDeleted(ZonedDateTime.now(), UUID.fromString(listId)))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
     suspend fun deleteItem(serverUrl: String, accessToken: String, itemId: String): Result<Unit> {
-        emit(EventType.ITEM_DELETED, itemId, emptyMap())
+        val item = listItemDao.getById(itemId) ?: return Result.failure(Exception("Item not found locally: $itemId"))
+        emit(ListItemDeleted(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId)))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
     suspend fun setColor(serverUrl: String, accessToken: String, listId: String, color: Color?): Result<Unit> {
-        emit(EventType.LIST_COLOR_CHANGED, listId, mapOf("colorHex" to color?.toHex()))
+        emit(ListRecolored(ZonedDateTime.now(), UUID.fromString(listId), color?.toHex()))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
-    suspend fun updateSortOrder(serverUrl: String, accessToken: String, orderedListIds: List<String>): Result<Unit> {
-        orderedListIds.forEachIndexed { index, id ->
-            val existing = listDao.getById(id)
-            if (existing != null && existing.sortOrder != index) {
-                emit(EventType.LIST_REORDERED, id, mapOf("sortOrder" to index.toString()))
-            }
-        }
+    suspend fun shareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> {
+        emit(ListShared(ZonedDateTime.now(), UUID.fromString(listId), username))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
-    suspend fun updateSharedWith(
-        serverUrl: String,
-        accessToken: String,
-        listId: String,
-        sharedWith: List<String>
-    ): Result<Unit> {
-        emit(EventType.LIST_SHARED_WITH_CHANGED, listId, mapOf("sharedWith" to sharedWith.joinToString("|")))
+    suspend fun unshareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> {
+        emit(ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), username))
         return syncPendingChanges(serverUrl, accessToken)
     }
 
     suspend fun markSharedExternally(serverUrl: String, accessToken: String, listId: String): Result<Unit> {
-        emit(EventType.LIST_SHARED_EXTERNALLY, listId, emptyMap())
+        emit(ListSharedExternally(ZonedDateTime.now(), UUID.fromString(listId)))
         return syncPendingChanges(serverUrl, accessToken)
+    }
+
+    /**
+     * Purely local, like [setCheckedSectionExpandedLocalOnly] - never an event, never synced.
+     * gross-recipes-common has no concept of list ordering at all, and for
+     * good reason: "position 2" only means something relative to the set of
+     * lists YOU can see, so broadcasting it as an event would apply your
+     * ordering to everyone a shared list is visible to. Each device keeps
+     * its own ordering.
+     */
+    suspend fun updateSortOrder(orderedListIds: List<String>) {
+        orderedListIds.forEachIndexed { index, id ->
+            val existing = listDao.getById(id)
+            if (existing != null && existing.sortOrder != index) {
+                listDao.upsert(existing.copy(sortOrder = index))
+            }
+        }
     }
 
     /** Pure UI state (which list's checked-off section is expanded) - never an event, never synced. */
@@ -146,39 +167,49 @@ class ListsRepository(
         syncStateManager.reset()
     }
 
-    // ---- The sync cycle: push our outbox, then pull + apply everyone else's. ----
+    // ---- The sync cycle: send our outbox + cursor, apply what comes back. ----
 
     suspend fun syncPendingChanges(serverUrl: String, accessToken: String): Result<Unit> {
         return try {
             val client = api(serverUrl, accessToken)
-            val deviceId = deviceIdProvider.getOrCreate()
 
             val outbox = outboxEventDao.getAll()
-            if (outbox.isNotEmpty()) {
-                val envelopes = outbox.map { it.toEnvelope() }
-                val pushResponse = client.pushEvents(PushEventsRequest(deviceId, envelopes))
-                if (!pushResponse.isSuccessful) {
-                    return Result.failure(Exception("HTTP ${pushResponse.code()}"))
-                }
-                // Now durable on the server - this phone doesn't need to remember them anymore.
-                outbox.forEach { outboxEventDao.deleteById(it.id) }
-            }
+            val lastSync = syncStateManager.getLastSync()
 
-            val since = syncStateManager.getLastSyncedAt()
-            val pullResponse = client.pullEvents(since, deviceId)
-            if (!pullResponse.isSuccessful) {
-                return Result.failure(Exception("HTTP ${pullResponse.code()}"))
+            val response = client.sync(SyncRequest(outbox.map { it.event }, lastSync))
+            if (!response.isSuccessful) {
+                return Result.failure(Exception("HTTP ${response.code()}"))
             }
+            val body: SyncResponse = response.body() ?: return Result.failure(Exception("Empty response"))
 
-            val body: PullEventsResponse = pullResponse.body() ?: return Result.failure(Exception("Empty response"))
-            body.events.forEach { event ->
-                // Assumes the server returns events in the order they actually
-                // happened (so e.g. an ITEM_ADDED never arrives before its
-                // list's LIST_CREATED) - if that's ever violated, skip just the
-                // one bad event instead of aborting the whole sync.
+            // SyncResponse groups events into Patches per list - flatten back
+            // into one ordered stream to apply, same as before.
+            val receivedEvents = body.serverEvents.flatMap { patch -> patch.events }
+            receivedEvents.forEach { event ->
+                // Assumes events arrive in the order they actually happened
+                // (so e.g. a ListItemCreated never arrives before its list's
+                // ListCreated) - if that's ever violated, skip just the one
+                // bad event instead of aborting the whole sync.
                 runCatching { applyEvent(event) }
             }
-            syncStateManager.setLastSyncedAt(body.serverTime)
+
+            // Your friend's merge algorithm: if someone else already added the
+            // same item (same list, name matching ignoring case/spacing)
+            // while we were both offline, we only find out now - too late to
+            // stop our own copy from having just been sent above. So instead
+            // we fold our copy into theirs: carry over any local state (like
+            // already being checked) onto their item, then drop ours, so only
+            // one row shows up on screen from here on.
+            reconcileDuplicateItems(outbox.map { it.event }, receivedEvents)
+
+            // Everything above was just sent to the server as part of this
+            // same request - durable now, so this phone doesn't need to
+            // remember any of it (including anything just merged away).
+            outbox.forEach { outboxEventDao.deleteBySeq(it.seq) }
+
+            // Server-stamped cursor (added in 0.6) - same reasoning as our old
+            // backend's serverTime: never trust a client's own clock for this.
+            syncStateManager.setLastSync(body.syncDate)
 
             Result.success(Unit)
         } catch (e: Exception) {
@@ -186,105 +217,115 @@ class ListsRepository(
         }
     }
 
-    /** Builds an envelope, applies it locally right now, and queues it for the next push. */
-    private suspend fun emit(type: String, entityId: String, payload: Map<String, String?>) {
-        val envelope = EventEnvelope(
-            id = UUID.randomUUID().toString(),
-            type = type,
-            entityId = entityId,
-            payload = payload,
-            timestamp = System.currentTimeMillis(),
-            deviceId = deviceIdProvider.getOrCreate()
-        )
-        applyEvent(envelope)
-        outboxEventDao.insert(envelope.toOutboxEntity())
+    /** Builds an event, applies it locally right now, and queues it for the next sync. */
+    private suspend fun emit(event: Event) {
+        applyEvent(event)
+        outboxEventDao.insert(OutboxEventEntity(event = event))
+    }
+
+    private suspend fun reconcileDuplicateItems(pushedEvents: List<Event>, receivedEvents: List<Event>) {
+        val ourAdds = pushedEvents.filterIsInstance<ListItemCreated>()
+        val theirAdds = receivedEvents.filterIsInstance<ListItemCreated>()
+
+        for (ours in ourAdds) {
+            val match = theirAdds.firstOrNull { theirs ->
+                theirs.listId == ours.listId &&
+                    theirs.name.trim().equals(ours.name.trim(), ignoreCase = true)
+            } ?: continue
+
+            val ourItemId = ours.id.toString()
+            val theirItemId = match.id.toString()
+            if (ourItemId == theirItemId) continue
+
+            // Their item was already created (via applyEvent above) - carry
+            // over anything we'd already done locally to our copy before we drop it.
+            val ourRow = listItemDao.getById(ourItemId)
+            if (ourRow?.checked == true) {
+                listItemDao.getById(theirItemId)?.let { theirRow ->
+                    listItemDao.upsert(theirRow.copy(checked = true))
+                }
+            }
+            listItemDao.deleteById(ourItemId)
+        }
     }
 
     /**
      * The reducer: turns one event into a local database change. This is the
      * one place that knows what each event type means - used both for events
-     * we just created ourselves and events pulled from other devices, so
+     * we just created ourselves and events received from other devices, so
      * applying an event always has the exact same effect no matter which
      * phone originally produced it.
      */
-    private suspend fun applyEvent(event: EventEnvelope) {
-        when (event.type) {
-            EventType.LIST_CREATED -> {
-                val existing = listDao.getById(event.entityId)
+    private suspend fun applyEvent(event: Event) {
+        when (event) {
+            is ListCreated -> {
+                val id = event.listId.toString()
+                val existing = listDao.getById(id)
                 listDao.upsert(
                     ListEntity(
-                        id = event.entityId,
-                        name = event.payload["name"] ?: existing?.name ?: "",
-                        owner = event.payload["owner"] ?: existing?.owner ?: "",
-                        colorHex = existing?.colorHex,
-                        sharedWith = existing?.sharedWith ?: emptyList(),
+                        id = id,
+                        name = event.name,
+                        owner = event.owner,
+                        colorHex = event.color?.ifBlank { null } ?: existing?.colorHex,
+                        sharedWith = if (event.sharedWith.isNotEmpty()) event.sharedWith else existing?.sharedWith ?: emptyList(),
                         sharedExternally = existing?.sharedExternally ?: false,
-                        sortOrder = event.payload["sortOrder"]?.toIntOrNull() ?: existing?.sortOrder ?: 0,
+                        sortOrder = existing?.sortOrder ?: (listDao.maxSortOrder() + 1),
                         checkedSectionExpanded = existing?.checkedSectionExpanded ?: false
                     )
                 )
             }
-            EventType.LIST_RENAMED -> {
-                listDao.getById(event.entityId)?.let { existing ->
-                    listDao.upsert(existing.copy(name = event.payload["name"] ?: existing.name))
+            is ListRenamed -> {
+                listDao.getById(event.listId.toString())?.let { existing ->
+                    listDao.upsert(existing.copy(name = event.name))
                 }
             }
-            EventType.LIST_DELETED -> listDao.deleteById(event.entityId)
-            EventType.LIST_COLOR_CHANGED -> {
-                listDao.getById(event.entityId)?.let { existing ->
-                    listDao.upsert(existing.copy(colorHex = event.payload["colorHex"]))
+            is ListDeleted -> listDao.deleteById(event.listId.toString())
+            is ListRecolored -> {
+                listDao.getById(event.listId.toString())?.let { existing ->
+                    listDao.upsert(existing.copy(colorHex = event.color?.ifBlank { null }))
                 }
             }
-            EventType.LIST_SHARED_WITH_CHANGED -> {
-                val sharedWith = event.payload["sharedWith"]
-                    ?.let { if (it.isBlank()) emptyList() else it.split("|") }
-                    ?: emptyList()
-                listDao.getById(event.entityId)?.let { existing ->
-                    listDao.upsert(existing.copy(sharedWith = sharedWith))
-                }
-            }
-            EventType.LIST_SHARED_EXTERNALLY -> {
-                listDao.getById(event.entityId)?.let { existing ->
-                    listDao.upsert(existing.copy(sharedExternally = true))
-                }
-            }
-            EventType.LIST_REORDERED -> {
-                val newOrder = event.payload["sortOrder"]?.toIntOrNull()
-                if (newOrder != null) {
-                    listDao.getById(event.entityId)?.let { existing ->
-                        listDao.upsert(existing.copy(sortOrder = newOrder))
+            is ListShared -> {
+                listDao.getById(event.listId.toString())?.let { existing ->
+                    if (event.sharedWith !in existing.sharedWith) {
+                        listDao.upsert(existing.copy(sharedWith = existing.sharedWith + event.sharedWith))
                     }
                 }
             }
-            EventType.ITEM_ADDED -> {
-                val listId = event.payload["listId"] ?: return
+            is ListUnshared -> {
+                listDao.getById(event.listId.toString())?.let { existing ->
+                    listDao.upsert(existing.copy(sharedWith = existing.sharedWith - event.unsharedWith))
+                }
+            }
+            is ListSharedExternally -> {
+                listDao.getById(event.listId.toString())?.let { existing ->
+                    listDao.upsert(existing.copy(sharedExternally = true))
+                }
+            }
+            is ListItemCreated -> {
                 listItemDao.upsert(
                     ListItemEntity(
-                        id = event.entityId,
-                        listId = listId,
-                        name = event.payload["name"] ?: "",
+                        id = event.id.toString(),
+                        listId = event.listId.toString(),
+                        name = event.name,
                         checked = false
                     )
                 )
             }
-            EventType.ITEM_CHECKED_CHANGED -> {
-                val checked = event.payload["checked"]?.toBoolean() ?: false
-                listItemDao.getById(event.entityId)?.let { existing ->
-                    listItemDao.upsert(existing.copy(checked = checked))
+            is ListItemRenamed -> {
+                listItemDao.getById(event.listItemId.toString())?.let { existing ->
+                    listItemDao.upsert(existing.copy(name = event.name))
                 }
             }
-            EventType.ITEM_DELETED -> listItemDao.deleteById(event.entityId)
+            is ListItemChecked -> {
+                listItemDao.getById(event.listItemId.toString())?.let { existing ->
+                    listItemDao.upsert(existing.copy(checked = event.checked))
+                }
+            }
+            is ListItemDeleted -> listItemDao.deleteById(event.listItemId.toString())
         }
     }
 }
-
-private fun EventEnvelope.toOutboxEntity(): OutboxEventEntity = OutboxEventEntity(
-    id = id, type = type, entityId = entityId, payload = payload, timestamp = timestamp, deviceId = deviceId
-)
-
-private fun OutboxEventEntity.toEnvelope(): EventEnvelope = EventEnvelope(
-    id = id, type = type, entityId = entityId, payload = payload, timestamp = timestamp, deviceId = deviceId
-)
 
 private fun ListEntity.toDomain(items: List<ListItemEntity>): GroceryList = GroceryList(
     id = id,

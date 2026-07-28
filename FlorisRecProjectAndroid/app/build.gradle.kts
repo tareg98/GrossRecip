@@ -62,6 +62,17 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.reorderable)
 
+    // Shared sync/merge algorithm - must stay identical to the backend's copy
+    // of this same library, or the two sides can drift out of sync. Excludes
+    // its transitive dependency on the full "modulith" backend framework
+    // (Hibernate, Spark, JAXB, logging...) - we only use the library's plain
+    // Event data classes, never anything that actually needs modulith, and
+    // that framework's own dependencies conflict with each other during APK
+    // packaging (multiple jars shipping files at the same META-INF path).
+    implementation("com.sirolf2009.grossrecipes:gross-recipes-common:0.6") {
+        exclude(group = "com.sirolf2009", module = "modulith")
+    }
+
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

@@ -8,10 +8,10 @@ import androidx.room.TypeConverters
 
 @Database(
     entities = [ListEntity::class, ListItemEntity::class, OutboxEventEntity::class],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
-@TypeConverters(StringListConverter::class, OutboxPayloadConverter::class)
+@TypeConverters(StringListConverter::class, EventConverter::class)
 abstract class AppDatabase : RoomDatabase() {
 
     abstract fun listDao(): ListDao

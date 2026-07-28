@@ -1,36 +1,27 @@
 package com.example.grossrecipes.data
 
-import com.example.grossrecipes.data.dto.PullEventsResponse
-import com.example.grossrecipes.data.dto.PushEventsRequest
-import com.google.gson.Gson
+import com.sirolf2009.grossrecipes.sync.dto.SyncRequest
+import com.sirolf2009.grossrecipes.sync.dto.SyncResponse
 import kotlinx.coroutines.runBlocking
 import okhttp3.OkHttpClient
-import okhttp3.ResponseBody
 import retrofit2.Response
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
 import retrofit2.http.Body
-import retrofit2.http.GET
 import retrofit2.http.POST
-import retrofit2.http.Query
 
 /**
  * Event-sourced sync: instead of one REST call per action (create list, set
- * checked, etc.), there are exactly two calls - push what happened here,
- * pull what happened everywhere else. This is a NEW backend contract (your
- * friend's PoC design) - the real backend doesn't have Events/push or
- * Events/pull yet. See ListsRepository for how events are built and applied.
+ * checked, etc.), there's exactly one call - send what happened here, get
+ * back what happened everywhere else, in the same round trip. Uses
+ * gross-recipes-common's own SyncRequest/SyncResponse types directly so the
+ * wire format matches your friend's side exactly. See ListsRepository for how
+ * events are built and applied.
  */
 interface ListsApi {
 
-    @POST("Events/push")
-    suspend fun pushEvents(@Body request: PushEventsRequest): Response<ResponseBody>
-
-    @GET("Events/pull")
-    suspend fun pullEvents(
-        @Query("since") since: Long,
-        @Query("deviceId") deviceId: String
-    ): Response<PullEventsResponse>
+    @POST("Events/sync")
+    suspend fun sync(@Body request: SyncRequest): Response<SyncResponse>
 }
 
 /**
@@ -66,7 +57,7 @@ fun createListsApi(serverUrl: String, accessToken: String, sessionManager: Sessi
                     val refreshResponse = accountApi.refresh()
                     if (!refreshResponse.isSuccessful) return@runBlocking null
                     val bodyText = refreshResponse.body()?.string() ?: return@runBlocking null
-                    val refreshed = Gson().fromJson(bodyText, String::class.java)
+                    val refreshed = com.google.gson.Gson().fromJson(bodyText, String::class.java)
                     sessionManager.updateAccessToken(refreshed)
                     refreshed
                 } catch (e: Exception) {
@@ -88,7 +79,7 @@ fun createListsApi(serverUrl: String, accessToken: String, sessionManager: Sessi
     return Retrofit.Builder()
         .baseUrl(baseUrl)
         .client(client)
-        .addConverterFactory(GsonConverterFactory.create())
+        .addConverterFactory(GsonConverterFactory.create(eventGson))
         .build()
         .create(ListsApi::class.java)
 }
