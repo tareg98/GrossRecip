@@ -168,7 +168,19 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         val session: Session = sessionManager.currentSession()
         if (session.isLoggedIn) {
             block(session.serverUrl, session.accessToken!!)
-                .onFailure { e -> _errorMessage.value = e.message ?: "Something went wrong" }
+                .onFailure { e ->
+                    // If this failure was an expired access token that
+                    // ListsApi's Authenticator already tried to silently
+                    // refresh and couldn't, it's already logged us out as
+                    // part of handling it - the nav graph reacts to that and
+                    // sends us back to the login screen on its own. Showing a
+                    // "sync failed: HTTP 401" toast on top of that redirect
+                    // is just noise, not something the user can act on.
+                    val stillLoggedIn = sessionManager.currentSession().isLoggedIn
+                    if (stillLoggedIn) {
+                        _errorMessage.value = e.message ?: "Something went wrong"
+                    }
+                }
         }
     }
 }

@@ -22,7 +22,11 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,12 +41,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.grossrecipes.data.AuthOutcome
+import com.example.grossrecipes.data.RecentLogin
 import com.example.grossrecipes.data.SessionManager
 import com.example.grossrecipes.data.createAccountApi
 import com.example.grossrecipes.data.dto.Credentials
 import com.example.grossrecipes.data.parseAuthResponse
 import com.example.grossrecipes.ui.theme.Accent
 import com.example.grossrecipes.ui.theme.Accent2
+import com.example.grossrecipes.ui.theme.Accent2Light
 import com.example.grossrecipes.ui.theme.FaintText
 import com.example.grossrecipes.ui.theme.MutedText
 import com.example.grossrecipes.ui.theme.PillShape
@@ -61,6 +67,7 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
     val sessionManager = remember { SessionManager(context) }
     val coroutineScope = rememberCoroutineScope()
     val canLogIn = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank()
+    val recentLogins by sessionManager.recentLoginsFlow.collectAsState(initial = emptyList())
 
     Column(
         modifier = Modifier
@@ -99,6 +106,31 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
         )
 
         Spacer(modifier = Modifier.height(32.dp))
+
+        if (recentLogins.isNotEmpty()) {
+            Text(
+                text = "Recent",
+                style = MaterialTheme.typography.labelMedium,
+                color = MutedText,
+                modifier = Modifier.fillMaxWidth()
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            LazyRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                items(recentLogins) { recent ->
+                    RecentLoginChip(recent = recent) {
+                        // Never the password - that's never saved anywhere,
+                        // so it's left for the user to type themselves.
+                        serverUrl = recent.serverUrl
+                        username = recent.username
+                        errorMessage = null
+                    }
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+        }
 
         // Form fields
         OutlinedTextField(
@@ -170,6 +202,7 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
                                     accessToken = outcome.accessToken,
                                     refreshToken = outcome.refreshToken
                                 )
+                                sessionManager.rememberLogin(serverUrl, username)
                                 onLoginSuccess()
                             }
                             is AuthOutcome.Failure -> errorMessage = outcome.message
@@ -213,5 +246,19 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
             color = FaintText,
             textAlign = TextAlign.Center
         )
+    }
+}
+
+@Composable
+private fun RecentLoginChip(recent: RecentLogin, onClick: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Accent2Light)
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+    ) {
+        Text(recent.username, style = MaterialTheme.typography.labelLarge)
+        Text(recent.serverUrl, style = MaterialTheme.typography.bodySmall, color = MutedText)
     }
 }

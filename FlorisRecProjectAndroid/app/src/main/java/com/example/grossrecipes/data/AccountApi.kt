@@ -22,8 +22,10 @@ interface AccountApi {
     @POST("Account/register")
     suspend fun register(@Body credentials: Credentials): Response<ResponseBody>
 
-    // Matches the real backend: refresh needs the CURRENT (not-yet-fully-expired)
-    // access token in the Authorization header - it re-derives a new one from it.
+    // Takes the REFRESH token in the Authorization header (not the access
+    // token) - that's the one meant to still be valid long after the access
+    // token itself has expired, which is the entire point of refreshing.
+    // See ListsApi.createListsApi's Authenticator for where this gets called.
     // No body needed.
     @POST("Account/refresh")
     suspend fun refresh(): Response<ResponseBody>

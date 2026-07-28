@@ -196,6 +196,7 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
                                     accessToken = outcome.accessToken,
                                     refreshToken = outcome.refreshToken
                                 )
+                                sessionManager.rememberLogin(serverUrl, username)
                                 onSignUpSuccess()
                             }
                             is AuthOutcome.Failure -> errorMessage = outcome.message

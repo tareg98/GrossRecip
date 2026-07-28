@@ -1,6 +1,8 @@
 package com.example.grossrecipes.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +24,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -41,6 +46,9 @@ fun SettingsScreen(
 ) {
     val session by viewModel.session.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
+    val pendingChangeCount by viewModel.pendingChangeCount.collectAsState()
+    val clipboardManager = LocalClipboardManager.current
+    val context = LocalContext.current
 
     Column(
         modifier = Modifier
@@ -56,7 +64,14 @@ fun SettingsScreen(
                 .clip(CardShape)
                 .background(Surface)
         ) {
-            SettingsRow(label = "SERVER", value = session.serverUrl)
+            SettingsRow(
+                label = "SERVER",
+                value = session.serverUrl,
+                onClick = {
+                    clipboardManager.setText(AnnotatedString(session.serverUrl))
+                    Toast.makeText(context, "Server URL copied", Toast.LENGTH_SHORT).show()
+                }
+            )
             HorizontalDivider(color = DividerLight, thickness = 1.dp)
             SettingsRow(label = "SIGNED IN AS", value = session.username)
         }
@@ -70,22 +85,30 @@ fun SettingsScreen(
                 .background(Surface)
                 .padding(16.dp)
         ) {
+            // Connectivity alone isn't "synced" - the server can be reachable
+            // and still reject every request (an expired token, a server
+            // error, etc), which leaves changes sitting in the outbox
+            // un-synced despite isOnline being true. pendingChangeCount is
+            // the real signal: a row only leaves the outbox once a sync
+            // actually succeeds.
+            val fullySynced = isOnline && pendingChangeCount == 0
+
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
                         .size(8.dp)
                         .clip(CircleShape)
-                        .background(if (isOnline) Accent2 else Accent)
+                        .background(if (fullySynced) Accent2 else Accent)
                 )
                 Spacer(Modifier.width(8.dp))
                 Text("Sync status", style = MaterialTheme.typography.labelLarge)
             }
             Spacer(Modifier.height(8.dp))
             Text(
-                text = if (isOnline) {
-                    "All changes are synced with your server."
-                } else {
-                    "Can't reach your server right now. Changes are saved on this device and will sync automatically once you're back online."
+                text = when {
+                    !isOnline -> "Can't reach your server right now. Changes are saved on this device and will sync automatically once you're back online."
+                    pendingChangeCount > 0 -> "$pendingChangeCount change${if (pendingChangeCount == 1) "" else "s"} haven't made it to the server yet. Your connection looks fine, so the server may be rejecting the request - try again shortly."
+                    else -> "All changes are synced with your server."
                 },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MutedText
@@ -119,10 +142,11 @@ fun SettingsScreen(
 }
 
 @Composable
-private fun SettingsRow(label: String, value: String) {
+private fun SettingsRow(label: String, value: String, onClick: (() -> Unit)? = null) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(16.dp)
     ) {
         Text(label, style = MaterialTheme.typography.labelSmall, color = MutedText)

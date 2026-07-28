@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface OutboxEventDao {
@@ -12,6 +13,14 @@ interface OutboxEventDao {
 
     @Query("SELECT * FROM outbox_events ORDER BY seq ASC")
     suspend fun getAll(): List<OutboxEventEntity>
+
+    // A row only ever leaves the outbox once a sync actually round-trips
+    // successfully (see ListsRepository.syncPendingChanges) - so this count
+    // is the real, live answer to "is everything actually synced," unlike
+    // just checking network connectivity (which says nothing about the
+    // server rejecting requests, e.g. an expired token).
+    @Query("SELECT COUNT(*) FROM outbox_events")
+    fun observePendingCount(): Flow<Int>
 
     @Query("DELETE FROM outbox_events WHERE seq = :seq")
     suspend fun deleteBySeq(seq: Long)

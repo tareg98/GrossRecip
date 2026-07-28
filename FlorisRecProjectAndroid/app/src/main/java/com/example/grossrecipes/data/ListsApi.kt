@@ -25,12 +25,14 @@ interface ListsApi {
 }
 
 /**
- * [sessionManager] lets this client auto-recover from an expired access token:
- * on a 401/498, it calls the real /Account/refresh endpoint (using whatever
- * token is currently stored - refresh only works while that token is still
- * valid) and retries the failed request once with the new token. If refresh
- * itself fails, the session is cleared - the user has to log in again next
- * time they open the app.
+ * [sessionManager] lets this client auto-recover from an expired access
+ * token: on a 401/498, it calls the real /Account/refresh endpoint using the
+ * separately-stored, longer-lived refresh token (NOT the access token that
+ * just got rejected - the whole point of a refresh token is that it outlives
+ * the access token, so it's still good long after the access token has
+ * expired) and retries the failed request once with the new access token. If
+ * refresh itself fails, the session is cleared - the user has to log in
+ * again next time they open the app.
  */
 fun createListsApi(serverUrl: String, accessToken: String, sessionManager: SessionManager): ListsApi {
     val baseUrl = if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/"
@@ -48,12 +50,11 @@ fun createListsApi(serverUrl: String, accessToken: String, sessionManager: Sessi
             // something else is wrong and we shouldn't loop forever.
             if (response.priorResponse != null) return@authenticator null
 
-            val oldToken = response.request.header("Authorization")?.removePrefix("Bearer ")
-                ?: return@authenticator null
-
             val newToken = runBlocking {
                 try {
-                    val accountApi = createAccountApi(serverUrl, oldToken)
+                    val refreshToken = sessionManager.currentSession().refreshToken
+                        ?: return@runBlocking null
+                    val accountApi = createAccountApi(serverUrl, refreshToken)
                     val refreshResponse = accountApi.refresh()
                     if (!refreshResponse.isSuccessful) return@runBlocking null
                     val bodyText = refreshResponse.body()?.string() ?: return@runBlocking null

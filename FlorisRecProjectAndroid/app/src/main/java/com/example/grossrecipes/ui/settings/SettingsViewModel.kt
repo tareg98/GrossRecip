@@ -33,6 +33,13 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     val isOnline: StateFlow<Boolean> = connectivityObserver.observe()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    // Whether device connectivity is up says nothing about whether the
+    // server actually accepted the last sync (e.g. an expired token gets
+    // rejected even on a perfectly fine connection) - the outbox is the real
+    // source of truth for "did everything actually make it to the server."
+    val pendingChangeCount: StateFlow<Int> = database.outboxEventDao().observePendingCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     fun logout(onLoggedOut: () -> Unit) {
         viewModelScope.launch {
             // Wipe local lists/items/outbox and reset the sync cursor so a
