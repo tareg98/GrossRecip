@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,6 +38,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -85,8 +89,17 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
     val lists by viewModel.lists.collectAsState()
     val knownItemNames by viewModel.knownItemNames.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
     var showNewListDialog by remember { mutableStateOf(false) }
     var shareDialogListId by remember { mutableStateOf<String?>(null) }
+
+    val snackbarHostState = remember { SnackbarHostState() }
+    LaunchedEffect(errorMessage) {
+        errorMessage?.let {
+            snackbarHostState.showSnackbar(it)
+            viewModel.errorShown()
+        }
+    }
 
     // Local drag order: while dragging we reorder this copy instantly for a
     // smooth visual, then push the final order up to the ViewModel/backend
@@ -109,6 +122,11 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
     }
 
     Scaffold(
+        snackbarHost = {
+            SnackbarHost(snackbarHostState) { data ->
+                Snackbar(snackbarData = data)
+            }
+        },
         floatingActionButton = {
             FloatingActionButton(
                 onClick = { showNewListDialog = true },
@@ -125,7 +143,14 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(horizontal = 16.dp),
+                .padding(horizontal = 16.dp)
+                // enableEdgeToEdge() means the window no longer resizes itself
+                // around the keyboard (that's what android:windowSoftInputMode
+                // ="adjustResize" used to do) - without this, the keyboard
+                // just overlaps the bottom of the screen with nothing pushing
+                // content up, so a field near the bottom was unreachable and
+                // unreadable while typing. This reserves that space instead.
+                .imePadding(),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
@@ -407,6 +432,13 @@ private fun AddItemField(fieldBg: Color, knownItemNames: List<String>, onAddItem
         else knownItemNames.filter { it.contains(text, ignoreCase = true) }.take(5)
     }
 
+    val submit = {
+        if (text.isNotBlank()) {
+            onAddItem(text.trim())
+            text = ""
+        }
+    }
+
     Column {
         OutlinedTextField(
             value = text,
@@ -421,12 +453,14 @@ private fun AddItemField(fieldBg: Color, knownItemNames: List<String>, onAddItem
                 focusedBorderColor = Accent
             ),
             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-            keyboardActions = KeyboardActions(onDone = {
-                if (text.isNotBlank()) {
-                    onAddItem(text.trim())
-                    text = ""
+            keyboardActions = KeyboardActions(onDone = { submit() }),
+            // A visible button, not just the keyboard's Done/Enter key - not
+            // every keyboard makes that key obviously an "add" action.
+            trailingIcon = {
+                IconButton(onClick = { submit() }, enabled = text.isNotBlank()) {
+                    Icon(Icons.Default.Add, contentDescription = "Add item")
                 }
-            }),
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .onFocusChanged { focused = it.isFocused }

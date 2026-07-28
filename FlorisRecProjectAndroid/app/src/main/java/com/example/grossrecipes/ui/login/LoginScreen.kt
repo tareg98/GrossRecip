@@ -107,9 +107,7 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
             placeholder = { Text("Server URL") },
             singleLine = true,
             shape = PillShape,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -120,9 +118,7 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
             placeholder = { Text("Username") },
             singleLine = true,
             shape = PillShape,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -142,9 +138,7 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
                     )
                 }
             },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         if (errorMessage != null) {

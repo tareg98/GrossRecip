@@ -107,7 +107,18 @@ class ListsRepository(
     }
 
     suspend fun deleteList(serverUrl: String, accessToken: String, listId: String): Result<Unit> {
-        emit(ListDeleted(ZonedDateTime.now(), UUID.fromString(listId)))
+        // Only the owner's delete should remove the list for everyone. Anyone
+        // it's just shared with "deleting" it should only remove it from
+        // their own view - modeled as them unsharing themselves, not as a
+        // real ListDeleted, so the owner and everyone else keep their copy.
+        val me = sessionManager.currentSession().username
+        val list = listDao.getById(listId)
+        val event: Event = if (list != null && list.owner == me) {
+            ListDeleted(ZonedDateTime.now(), UUID.fromString(listId))
+        } else {
+            ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), me)
+        }
+        emit(event)
         return syncPendingChanges(serverUrl, accessToken)
     }
 
@@ -178,9 +189,14 @@ class ListsRepository(
 
             val response = client.sync(SyncRequest(outbox.map { it.event }, lastSync))
             if (!response.isSuccessful) {
-                return Result.failure(Exception("HTTP ${response.code()}"))
+                // Surface whatever the server actually said (e.g. the real
+                // MongoDB auth error text) instead of just a bare status code,
+                // so a failure has an actual reason attached to it.
+                val detail = runCatching { response.errorBody()?.string() }.getOrNull()?.take(300)
+                val message = "Sync failed: HTTP ${response.code()}" + if (!detail.isNullOrBlank()) " - $detail" else ""
+                return Result.failure(Exception(message))
             }
-            val body: SyncResponse = response.body() ?: return Result.failure(Exception("Empty response"))
+            val body: SyncResponse = response.body() ?: return Result.failure(Exception("Sync failed: empty response from server"))
 
             // SyncResponse groups events into Patches per list - flatten back
             // into one ordered stream to apply, same as before.
@@ -213,7 +229,11 @@ class ListsRepository(
 
             Result.success(Unit)
         } catch (e: Exception) {
-            Result.failure(e)
+            // Nothing local is touched above this point unless the sync
+            // actually succeeded, so a failed sync never loses data - it just
+            // leaves the outbox queued to retry next time. This message is
+            // what the user actually sees, so it needs to say why.
+            Result.failure(Exception("Sync failed: ${e.message ?: e.javaClass.simpleName}", e))
         }
     }
 
@@ -259,6 +279,15 @@ class ListsRepository(
     private suspend fun applyEvent(event: Event) {
         when (event) {
             is ListCreated -> {
+                // The server is supposed to only ever hand us events for lists
+                // we own or are shared with - but if it doesn't filter that
+                // correctly (or ever regresses), this is the one place a list
+                // enters our database for the first time, so it's the one
+                // place that must check. Skip anything that isn't ours instead
+                // of trusting the server's scoping blindly.
+                val me = sessionManager.currentSession().username
+                if (event.owner != me && me !in event.sharedWith) return
+
                 val id = event.listId.toString()
                 val existing = listDao.getById(id)
                 listDao.upsert(
@@ -293,8 +322,17 @@ class ListsRepository(
                 }
             }
             is ListUnshared -> {
-                listDao.getById(event.listId.toString())?.let { existing ->
-                    listDao.upsert(existing.copy(sharedWith = existing.sharedWith - event.unsharedWith))
+                val me = sessionManager.currentSession().username
+                if (event.unsharedWith == me) {
+                    // I'm the one being removed - this list is no longer mine
+                    // to see at all (this is also how a non-owner's "delete"
+                    // is modeled - see deleteList). FK cascade removes its
+                    // items along with the row via the real @Upsert-safe delete.
+                    listDao.deleteById(event.listId.toString())
+                } else {
+                    listDao.getById(event.listId.toString())?.let { existing ->
+                        listDao.upsert(existing.copy(sharedWith = existing.sharedWith - event.unsharedWith))
+                    }
                 }
             }
             is ListSharedExternally -> {
@@ -303,14 +341,19 @@ class ListsRepository(
                 }
             }
             is ListItemCreated -> {
-                listItemDao.upsert(
-                    ListItemEntity(
-                        id = event.id.toString(),
-                        listId = event.listId.toString(),
-                        name = event.name,
-                        checked = false
+                // Only if we actually have the parent list - if its ListCreated
+                // was filtered out above (a list that isn't ours), don't stash
+                // an orphaned item for it either.
+                if (listDao.getById(event.listId.toString()) != null) {
+                    listItemDao.upsert(
+                        ListItemEntity(
+                            id = event.id.toString(),
+                            listId = event.listId.toString(),
+                            name = event.name,
+                            checked = false
+                        )
                     )
-                )
+                }
             }
             is ListItemRenamed -> {
                 listItemDao.getById(event.listItemId.toString())?.let { existing ->

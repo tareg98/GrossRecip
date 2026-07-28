@@ -35,20 +35,28 @@ val Typography = Typography(
         fontWeight = FontWeight.Normal,
         fontSize = 16.sp
     ),
+    // These three (bodyLarge especially, since it's what text fields use for
+    // typed text) previously had no explicit lineHeight - Compose then falls
+    // back to the custom font's own reported line metrics, which for Figtree
+    // were too tight and clipped the bottom of descenders (g/y/p/j) in every
+    // OutlinedTextField in the app. Giving each an explicit lineHeight fixes it.
     bodyLarge = TextStyle(
         fontFamily = FigtreeFamily,
         fontWeight = FontWeight.Medium,
-        fontSize = 15.5.sp
+        fontSize = 15.5.sp,
+        lineHeight = 22.sp
     ),
     bodyMedium = TextStyle(
         fontFamily = FigtreeFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 14.sp
+        fontSize = 14.sp,
+        lineHeight = 20.sp
     ),
     bodySmall = TextStyle(
         fontFamily = FigtreeFamily,
         fontWeight = FontWeight.Normal,
-        fontSize = 12.sp
+        fontSize = 12.sp,
+        lineHeight = 17.sp
     ),
     labelLarge = TextStyle(
         fontFamily = FigtreeFamily,

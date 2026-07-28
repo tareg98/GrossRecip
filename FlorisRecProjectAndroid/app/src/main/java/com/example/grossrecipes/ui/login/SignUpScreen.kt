@@ -112,9 +112,7 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
             placeholder = { Text("Server URL") },
             singleLine = true,
             shape = PillShape,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -125,9 +123,7 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
             placeholder = { Text("Username") },
             singleLine = true,
             shape = PillShape,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -147,9 +143,7 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
                     )
                 }
             },
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -162,9 +156,7 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
             shape = PillShape,
             visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
             isError = confirmPassword.isNotEmpty() && !passwordsMatch,
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(46.dp)
+            modifier = Modifier.fillMaxWidth()
         )
 
         if (confirmPassword.isNotEmpty() && !passwordsMatch) {

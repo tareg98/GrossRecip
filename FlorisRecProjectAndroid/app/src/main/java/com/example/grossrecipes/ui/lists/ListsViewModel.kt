@@ -13,6 +13,7 @@ import com.example.grossrecipes.data.local.AppDatabase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -39,6 +40,15 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     // Real device connectivity - not a guess based on whether the last call worked.
     val isOnline: StateFlow<Boolean> = connectivityObserver.observe()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
+
+    // Whatever the last action's Result.failure said, so the screen can show
+    // it (e.g. "Sync failed: HTTP 500 - ..."). Cleared once shown.
+    private val _errorMessage = MutableStateFlow<String?>(null)
+    val errorMessage: StateFlow<String?> = _errorMessage.asStateFlow()
+
+    fun errorShown() {
+        _errorMessage.value = null
+    }
 
     init {
         // First load.
@@ -149,10 +159,16 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.updateSortOrder(orderedListIds) }
     }
 
-    private suspend fun withLoggedInSession(block: suspend (serverUrl: String, accessToken: String) -> Unit) {
+    // Every action function's lambda already ends with a repository call that
+    // returns Result<Unit> - previously that value just fell on the floor
+    // here (block's declared return type was Unit), so a failed sync or
+    // action failed completely silently. Now the Result is captured and, on
+    // failure, its message is published to errorMessage for the screen to show.
+    private suspend fun withLoggedInSession(block: suspend (serverUrl: String, accessToken: String) -> Result<Unit>) {
         val session: Session = sessionManager.currentSession()
         if (session.isLoggedIn) {
             block(session.serverUrl, session.accessToken!!)
+                .onFailure { e -> _errorMessage.value = e.message ?: "Something went wrong" }
         }
     }
 }
