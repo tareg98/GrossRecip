@@ -46,6 +46,7 @@ fun SettingsScreen(
 ) {
     val session by viewModel.session.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
+    val isSyncing by viewModel.isSyncing.collectAsState()
     val pendingChangeCount by viewModel.pendingChangeCount.collectAsState()
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
@@ -85,13 +86,12 @@ fun SettingsScreen(
                 .background(Surface)
                 .padding(16.dp)
         ) {
-            // Connectivity alone isn't "synced" - the server can be reachable
-            // and still reject every request (an expired token, a server
-            // error, etc), which leaves changes sitting in the outbox
-            // un-synced despite isOnline being true. pendingChangeCount is
-            // the real signal: a row only leaves the outbox once a sync
-            // actually succeeds.
-            val fullySynced = isOnline && pendingChangeCount == 0
+            // Neither connectivity nor an empty outbox alone means "synced":
+            // the server can be reachable and still reject every request (an
+            // expired token, a server error, etc), and right after login the
+            // outbox is legitimately empty before the first pull has even
+            // happened - isSyncing is what covers that gap.
+            val fullySynced = isOnline && !isSyncing && pendingChangeCount == 0
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
@@ -107,6 +107,7 @@ fun SettingsScreen(
             Text(
                 text = when {
                     !isOnline -> "Can't reach your server right now. Changes are saved on this device and will sync automatically once you're back online."
+                    isSyncing -> "Syncing…"
                     pendingChangeCount > 0 -> "$pendingChangeCount change${if (pendingChangeCount == 1) "" else "s"} haven't made it to the server yet. Your connection looks fine, so the server may be rejecting the request - try again shortly."
                     else -> "All changes are synced with your server."
                 },

@@ -89,6 +89,8 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
     val lists by viewModel.lists.collectAsState()
     val knownItemNames by viewModel.knownItemNames.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
+    val isSyncing by viewModel.isSyncing.collectAsState()
+    val pendingChangeCount by viewModel.pendingChangeCount.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     var showNewListDialog by remember { mutableStateOf(false) }
     var shareDialogListId by remember { mutableStateOf<String?>(null) }
@@ -161,7 +163,7 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("My Lists", style = MaterialTheme.typography.titleLarge)
-                    SyncPill(isOnline = isOnline)
+                    SyncPill(isOnline = isOnline, isSyncing = isSyncing, pendingChangeCount = pendingChangeCount)
                 }
             }
 
@@ -213,10 +215,21 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
 }
 
 @Composable
-private fun SyncPill(isOnline: Boolean) {
-    val bg = if (isOnline) Accent2Light else SyncOfflineBg
-    val fg = if (isOnline) Accent2Deep else SyncOfflineText
-    val dotColor = if (isOnline) Accent2 else Accent
+private fun SyncPill(isOnline: Boolean, isSyncing: Boolean, pendingChangeCount: Int) {
+    // Same logic as SettingsScreen's status text - connectivity alone isn't
+    // "synced" (the server can reject requests, e.g. an expired token), and
+    // neither is an empty outbox right after login (nothing local to push
+    // yet doesn't mean the first pull from the server has happened).
+    val label = when {
+        !isOnline -> "Offline"
+        isSyncing -> "Syncing…"
+        pendingChangeCount > 0 -> "Pending"
+        else -> "Synced"
+    }
+    val fullySynced = isOnline && !isSyncing && pendingChangeCount == 0
+    val bg = if (fullySynced) Accent2Light else SyncOfflineBg
+    val fg = if (fullySynced) Accent2Deep else SyncOfflineText
+    val dotColor = if (fullySynced) Accent2 else Accent
 
     Row(
         modifier = Modifier
@@ -233,7 +246,7 @@ private fun SyncPill(isOnline: Boolean) {
         )
         Spacer(Modifier.width(6.dp))
         Text(
-            text = if (isOnline) "Synced" else "Offline",
+            text = label,
             style = MaterialTheme.typography.labelMedium,
             color = fg
         )

@@ -8,8 +8,6 @@ import com.example.grossrecipes.data.ConnectivityObserver
 import com.example.grossrecipes.data.ListsRepository
 import com.example.grossrecipes.data.Session
 import com.example.grossrecipes.data.SessionManager
-import com.example.grossrecipes.data.SyncStateManager
-import com.example.grossrecipes.data.local.AppDatabase
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -21,14 +19,10 @@ import kotlinx.coroutines.launch
 class ListsViewModel(application: Application) : AndroidViewModel(application) {
 
     private val sessionManager = SessionManager(application)
-    private val database = AppDatabase.getInstance(application)
-    private val repository = ListsRepository(
-        database.listDao(),
-        database.listItemDao(),
-        database.outboxEventDao(),
-        SyncStateManager(application),
-        sessionManager
-    )
+    // The singleton, not a fresh instance - see ListsRepository's class doc.
+    // SettingsViewModel reaches the exact same instance, so its isSyncing
+    // and outbox-derived state agree with what this screen shows.
+    private val repository = ListsRepository.getInstance(application)
     private val connectivityObserver = ConnectivityObserver(application)
 
     val lists: StateFlow<List<GroceryList>> = repository.observeLists()
@@ -41,6 +35,12 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     val isOnline: StateFlow<Boolean> = connectivityObserver.observe()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
+    // Together, these are what an accurate "Synced" pill actually needs -
+    // see ListsRepository.isSyncing for why connectivity/outbox alone aren't enough.
+    val isSyncing: StateFlow<Boolean> = repository.isSyncing
+    val pendingChangeCount: StateFlow<Int> = repository.observePendingChangeCount()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
     // Whatever the last action's Result.failure said, so the screen can show
     // it (e.g. "Sync failed: HTTP 500 - ..."). Cleared once shown.
     private val _errorMessage = MutableStateFlow<String?>(null)
@@ -51,10 +51,13 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     init {
-        // First load.
-        refresh()
-
-        // Automatic sync the moment the phone reconnects - no button.
+        // ConnectivityObserver reports the CURRENT connectivity state the
+        // instant it's collected (not just future changes), so this alone
+        // already covers "first load" - it doesn't need a separate refresh()
+        // call alongside it. Having both used to fire two syncs back-to-back
+        // on every login/app-open; ListsRepository's syncMutex would keep
+        // that safe now, but there's no reason to make the server do the
+        // same full-history sync twice in a row.
         viewModelScope.launch {
             connectivityObserver.observe().distinctUntilChanged().collect { online ->
                 if (online) {

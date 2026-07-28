@@ -1,7 +1,9 @@
 package com.example.grossrecipes.data
 
+import android.content.Context
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import com.example.grossrecipes.data.local.AppDatabase
 import com.example.grossrecipes.data.local.ListDao
 import com.example.grossrecipes.data.local.ListEntity
 import com.example.grossrecipes.data.local.ListItemDao
@@ -25,8 +27,13 @@ import com.sirolf2009.grossrecipes.event.listItem.ListItemRenamed
 import com.sirolf2009.grossrecipes.sync.dto.SyncRequest
 import com.sirolf2009.grossrecipes.sync.dto.SyncResponse
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.ZonedDateTime
 import java.util.UUID
 
@@ -49,6 +56,21 @@ import java.util.UUID
  * on the server now). A brand-new install has a cursor of epoch, so its
  * first sync naturally receives the entire history and bootstraps its local
  * database - there's no separate "initial load" code path.
+ *
+ * [syncMutex] serializes every action + sync so only one ever touches the
+ * outbox/cursor/local tables at a time. Without it, two overlapping syncs
+ * (e.g. ListsViewModel's initial refresh() and its "just reconnected"
+ * listener both firing at once on login/app-open) would both read the same
+ * epoch cursor, both request the entire server history, and both apply that
+ * history to Room concurrently and out of order relative to each other -
+ * exactly what caused lists to flicker in and out on login, and part of why
+ * "fully synced" could look true locally while a second, still-in-flight
+ * request was still being processed server-side.
+ *
+ * Must be reached through [getInstance] rather than constructed directly -
+ * both ListsViewModel and SettingsViewModel need to see the SAME [syncMutex]
+ * and [isSyncing] to have any meaning across screens; two separate instances
+ * would each have their own, defeating the point of either.
  */
 class ListsRepository(
     private val listDao: ListDao,
@@ -57,6 +79,17 @@ class ListsRepository(
     private val syncStateManager: SyncStateManager,
     private val sessionManager: SessionManager
 ) {
+
+    private val syncMutex = Mutex()
+
+    // True for exactly as long as an actual network sync is in flight - the
+    // one thing neither connectivity nor the outbox count can tell you.
+    // Right after login the outbox is legitimately empty (nothing local has
+    // been created yet to push), so "pending changes == 0" alone looks
+    // "synced" even though the very first pull from the server hasn't
+    // happened yet - this flag is what covers that gap.
+    private val _isSyncing = MutableStateFlow(false)
+    val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
 
     private fun api(serverUrl: String, accessToken: String) =
         createListsApi(serverUrl, accessToken, sessionManager)
@@ -69,8 +102,15 @@ class ListsRepository(
     fun observeKnownItemNames(): Flow<List<String>> =
         listItemDao.observeAllItems().map { items -> items.map { it.name }.distinct() }
 
+    // A row only ever leaves the outbox once a sync actually round-trips
+    // successfully - so together with isSyncing, this is what "fully synced"
+    // actually means: not mid-sync, and nothing left waiting to go out.
+    fun observePendingChangeCount(): Flow<Int> = outboxEventDao.observePendingCount()
+
     // ---- Actions: each one builds an event, applies it locally right away, ----
     // ---- queues it, then tries to sync immediately in case we're online.   ----
+    // ---- The whole thing runs under syncMutex so it can never interleave   ----
+    // ---- with another action or a background sync.                        ----
 
     suspend fun createList(
         serverUrl: String,
@@ -78,10 +118,10 @@ class ListsRepository(
         name: String,
         color: Color?,
         sharedWithUsername: String
-    ): Result<Unit> {
+    ): Result<Unit> = syncMutex.withLock {
         val owner = sessionManager.currentSession().username
 
-        emit(
+        applyAndQueue(
             ListCreated(
                 time = ZonedDateTime.now(),
                 listId = UUID.randomUUID(),
@@ -92,61 +132,71 @@ class ListsRepository(
             )
         )
 
-        return syncPendingChanges(serverUrl, accessToken)
+        syncPendingChangesLocked(serverUrl, accessToken)
     }
 
-    suspend fun addItem(serverUrl: String, accessToken: String, listId: String, itemName: String): Result<Unit> {
-        emit(ListItemCreated(ZonedDateTime.now(), UUID.fromString(listId), UUID.randomUUID(), itemName))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
-
-    suspend fun setChecked(serverUrl: String, accessToken: String, itemId: String, checked: Boolean): Result<Unit> {
-        val item = listItemDao.getById(itemId) ?: return Result.failure(Exception("Item not found locally: $itemId"))
-        emit(ListItemChecked(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId), checked))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
-
-    suspend fun deleteList(serverUrl: String, accessToken: String, listId: String): Result<Unit> {
-        // Only the owner's delete should remove the list for everyone. Anyone
-        // it's just shared with "deleting" it should only remove it from
-        // their own view - modeled as them unsharing themselves, not as a
-        // real ListDeleted, so the owner and everyone else keep their copy.
-        val me = sessionManager.currentSession().username
-        val list = listDao.getById(listId)
-        val event: Event = if (list != null && list.owner == me) {
-            ListDeleted(ZonedDateTime.now(), UUID.fromString(listId))
-        } else {
-            ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), me)
+    suspend fun addItem(serverUrl: String, accessToken: String, listId: String, itemName: String): Result<Unit> =
+        syncMutex.withLock {
+            applyAndQueue(ListItemCreated(ZonedDateTime.now(), UUID.fromString(listId), UUID.randomUUID(), itemName))
+            syncPendingChangesLocked(serverUrl, accessToken)
         }
-        emit(event)
-        return syncPendingChanges(serverUrl, accessToken)
-    }
 
-    suspend fun deleteItem(serverUrl: String, accessToken: String, itemId: String): Result<Unit> {
-        val item = listItemDao.getById(itemId) ?: return Result.failure(Exception("Item not found locally: $itemId"))
-        emit(ListItemDeleted(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId)))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
+    suspend fun setChecked(serverUrl: String, accessToken: String, itemId: String, checked: Boolean): Result<Unit> =
+        syncMutex.withLock {
+            val item = listItemDao.getById(itemId)
+                ?: return@withLock Result.failure(Exception("Item not found locally: $itemId"))
+            applyAndQueue(ListItemChecked(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId), checked))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
 
-    suspend fun setColor(serverUrl: String, accessToken: String, listId: String, color: Color?): Result<Unit> {
-        emit(ListRecolored(ZonedDateTime.now(), UUID.fromString(listId), color?.toHex()))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
+    suspend fun deleteList(serverUrl: String, accessToken: String, listId: String): Result<Unit> =
+        syncMutex.withLock {
+            // Only the owner's delete should remove the list for everyone. Anyone
+            // it's just shared with "deleting" it should only remove it from
+            // their own view - modeled as them unsharing themselves, not as a
+            // real ListDeleted, so the owner and everyone else keep their copy.
+            val me = sessionManager.currentSession().username
+            val list = listDao.getById(listId)
+            val event: Event = if (list != null && list.owner == me) {
+                ListDeleted(ZonedDateTime.now(), UUID.fromString(listId))
+            } else {
+                ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), me)
+            }
+            applyAndQueue(event)
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
 
-    suspend fun shareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> {
-        emit(ListShared(ZonedDateTime.now(), UUID.fromString(listId), username))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
+    suspend fun deleteItem(serverUrl: String, accessToken: String, itemId: String): Result<Unit> =
+        syncMutex.withLock {
+            val item = listItemDao.getById(itemId)
+                ?: return@withLock Result.failure(Exception("Item not found locally: $itemId"))
+            applyAndQueue(ListItemDeleted(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId)))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
 
-    suspend fun unshareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> {
-        emit(ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), username))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
+    suspend fun setColor(serverUrl: String, accessToken: String, listId: String, color: Color?): Result<Unit> =
+        syncMutex.withLock {
+            applyAndQueue(ListRecolored(ZonedDateTime.now(), UUID.fromString(listId), color?.toHex()))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
 
-    suspend fun markSharedExternally(serverUrl: String, accessToken: String, listId: String): Result<Unit> {
-        emit(ListSharedExternally(ZonedDateTime.now(), UUID.fromString(listId)))
-        return syncPendingChanges(serverUrl, accessToken)
-    }
+    suspend fun shareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> =
+        syncMutex.withLock {
+            applyAndQueue(ListShared(ZonedDateTime.now(), UUID.fromString(listId), username))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
+
+    suspend fun unshareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> =
+        syncMutex.withLock {
+            applyAndQueue(ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), username))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
+
+    suspend fun markSharedExternally(serverUrl: String, accessToken: String, listId: String): Result<Unit> =
+        syncMutex.withLock {
+            applyAndQueue(ListSharedExternally(ZonedDateTime.now(), UUID.fromString(listId)))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
 
     /**
      * Purely local, like [setCheckedSectionExpandedLocalOnly] - never an event, never synced.
@@ -171,7 +221,7 @@ class ListsRepository(
     }
 
     /** Called on logout so a different account logging in on this phone doesn't see stale data. */
-    suspend fun clearAllLocalData() {
+    suspend fun clearAllLocalData() = syncMutex.withLock {
         listDao.deleteAll()
         listItemDao.deleteAll()
         outboxEventDao.deleteAll()
@@ -180,7 +230,21 @@ class ListsRepository(
 
     // ---- The sync cycle: send our outbox + cursor, apply what comes back. ----
 
-    suspend fun syncPendingChanges(serverUrl: String, accessToken: String): Result<Unit> {
+    /** Called directly (not via an action) on startup, on reconnect, and from the manual refresh button. */
+    suspend fun syncPendingChanges(serverUrl: String, accessToken: String): Result<Unit> =
+        syncMutex.withLock { syncPendingChangesLocked(serverUrl, accessToken) }
+
+    /** Same as [syncPendingChanges] but assumes the caller already holds [syncMutex] - never call this directly. */
+    private suspend fun syncPendingChangesLocked(serverUrl: String, accessToken: String): Result<Unit> {
+        _isSyncing.value = true
+        try {
+            return syncPendingChangesInner(serverUrl, accessToken)
+        } finally {
+            _isSyncing.value = false
+        }
+    }
+
+    private suspend fun syncPendingChangesInner(serverUrl: String, accessToken: String): Result<Unit> {
         return try {
             val client = api(serverUrl, accessToken)
 
@@ -237,8 +301,12 @@ class ListsRepository(
         }
     }
 
-    /** Builds an event, applies it locally right now, and queues it for the next sync. */
-    private suspend fun emit(event: Event) {
+    /**
+     * Builds an event, applies it locally right now, and queues it for the
+     * next sync. Assumes the caller already holds [syncMutex] - never call
+     * this directly.
+     */
+    private suspend fun applyAndQueue(event: Event) {
         applyEvent(event)
         outboxEventDao.insert(OutboxEventEntity(event = event))
     }
@@ -366,6 +434,28 @@ class ListsRepository(
                 }
             }
             is ListItemDeleted -> listItemDao.deleteById(event.listItemId.toString())
+        }
+    }
+
+    companion object {
+        @Volatile
+        private var INSTANCE: ListsRepository? = null
+
+        /** Same one instance app-wide - see the class doc for why that matters (shared syncMutex/isSyncing). */
+        fun getInstance(context: Context): ListsRepository {
+            return INSTANCE ?: synchronized(this) {
+                INSTANCE ?: run {
+                    val appContext = context.applicationContext
+                    val database = AppDatabase.getInstance(appContext)
+                    ListsRepository(
+                        database.listDao(),
+                        database.listItemDao(),
+                        database.outboxEventDao(),
+                        SyncStateManager(appContext),
+                        SessionManager(appContext)
+                    ).also { INSTANCE = it }
+                }
+            }
         }
     }
 }
