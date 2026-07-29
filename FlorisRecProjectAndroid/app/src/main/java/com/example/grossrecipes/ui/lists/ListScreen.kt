@@ -90,6 +90,7 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
     val knownItemNames by viewModel.knownItemNames.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
+    val lastSyncError by viewModel.lastSyncError.collectAsState()
     val pendingChangeCount by viewModel.pendingChangeCount.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
     var showNewListDialog by remember { mutableStateOf(false) }
@@ -163,7 +164,12 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text("My Lists", style = MaterialTheme.typography.titleLarge)
-                    SyncPill(isOnline = isOnline, isSyncing = isSyncing, pendingChangeCount = pendingChangeCount)
+                    SyncPill(
+                        isOnline = isOnline,
+                        isSyncing = isSyncing,
+                        lastSyncError = lastSyncError,
+                        pendingChangeCount = pendingChangeCount
+                    )
                 }
             }
 
@@ -215,18 +221,20 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
 }
 
 @Composable
-private fun SyncPill(isOnline: Boolean, isSyncing: Boolean, pendingChangeCount: Int) {
+private fun SyncPill(isOnline: Boolean, isSyncing: Boolean, lastSyncError: String?, pendingChangeCount: Int) {
     // Same logic as SettingsScreen's status text - connectivity alone isn't
     // "synced" (the server can reject requests, e.g. an expired token), and
-    // neither is an empty outbox right after login (nothing local to push
-    // yet doesn't mean the first pull from the server has happened).
+    // neither is an empty outbox right after login or after a failed pull
+    // with nothing local to push (lastSyncError catches that one). Full
+    // error detail lives in Settings - this pill just needs to say "wrong."
     val label = when {
         !isOnline -> "Offline"
         isSyncing -> "Syncing…"
+        lastSyncError != null -> "Sync error"
         pendingChangeCount > 0 -> "Pending"
         else -> "Synced"
     }
-    val fullySynced = isOnline && !isSyncing && pendingChangeCount == 0
+    val fullySynced = isOnline && !isSyncing && lastSyncError == null && pendingChangeCount == 0
     val bg = if (fullySynced) Accent2Light else SyncOfflineBg
     val fg = if (fullySynced) Accent2Deep else SyncOfflineText
     val dotColor = if (fullySynced) Accent2 else Accent

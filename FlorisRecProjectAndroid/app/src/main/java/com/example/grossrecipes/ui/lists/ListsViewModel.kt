@@ -36,8 +36,9 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), true)
 
     // Together, these are what an accurate "Synced" pill actually needs -
-    // see ListsRepository.isSyncing for why connectivity/outbox alone aren't enough.
+    // see ListsRepository.isSyncing/lastSyncError for why connectivity/outbox alone aren't enough.
     val isSyncing: StateFlow<Boolean> = repository.isSyncing
+    val lastSyncError: StateFlow<String?> = repository.lastSyncError
     val pendingChangeCount: StateFlow<Int> = repository.observePendingChangeCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
 

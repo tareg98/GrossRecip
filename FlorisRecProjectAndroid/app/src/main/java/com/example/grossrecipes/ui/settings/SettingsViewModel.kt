@@ -32,6 +32,12 @@ class SettingsViewModel(application: Application) : AndroidViewModel(application
     // local to push yet) but the first pull from the server hasn't happened.
     val isSyncing: StateFlow<Boolean> = repository.isSyncing
 
+    // The last sync attempt's failure reason, if any - kept until the next
+    // sync actually succeeds. Covers the case where the outbox was already
+    // empty (nothing local to push) so pendingChangeCount alone never showed
+    // that the pull itself had failed.
+    val lastSyncError: StateFlow<String?> = repository.lastSyncError
+
     // Whether device connectivity is up says nothing about whether the
     // server actually accepted the last sync (e.g. an expired token gets
     // rejected even on a perfectly fine connection) - the outbox is the real

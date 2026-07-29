@@ -47,6 +47,7 @@ fun SettingsScreen(
     val session by viewModel.session.collectAsState()
     val isOnline by viewModel.isOnline.collectAsState()
     val isSyncing by viewModel.isSyncing.collectAsState()
+    val lastSyncError by viewModel.lastSyncError.collectAsState()
     val pendingChangeCount by viewModel.pendingChangeCount.collectAsState()
     val clipboardManager = LocalClipboardManager.current
     val context = LocalContext.current
@@ -86,12 +87,13 @@ fun SettingsScreen(
                 .background(Surface)
                 .padding(16.dp)
         ) {
-            // Neither connectivity nor an empty outbox alone means "synced":
-            // the server can be reachable and still reject every request (an
-            // expired token, a server error, etc), and right after login the
-            // outbox is legitimately empty before the first pull has even
-            // happened - isSyncing is what covers that gap.
-            val fullySynced = isOnline && !isSyncing && pendingChangeCount == 0
+            // Neither connectivity, an empty outbox, nor "not mid-sync" alone
+            // means "synced": the server can be reachable and still reject
+            // every request (an expired token, a server error, etc), and
+            // that can happen with nothing local queued to push (a PULL can
+            // fail on its own) - lastSyncError is what catches that case,
+            // since pendingChangeCount would stay 0 throughout.
+            val fullySynced = isOnline && !isSyncing && lastSyncError == null && pendingChangeCount == 0
 
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
@@ -108,6 +110,7 @@ fun SettingsScreen(
                 text = when {
                     !isOnline -> "Can't reach your server right now. Changes are saved on this device and will sync automatically once you're back online."
                     isSyncing -> "Syncing…"
+                    lastSyncError != null -> "Last sync failed: $lastSyncError"
                     pendingChangeCount > 0 -> "$pendingChangeCount change${if (pendingChangeCount == 1) "" else "s"} haven't made it to the server yet. Your connection looks fine, so the server may be rejecting the request - try again shortly."
                     else -> "All changes are synced with your server."
                 },

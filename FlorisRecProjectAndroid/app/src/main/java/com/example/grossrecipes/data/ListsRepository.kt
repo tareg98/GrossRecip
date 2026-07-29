@@ -3,6 +3,7 @@ package com.example.grossrecipes.data
 import android.content.Context
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.room.withTransaction
 import com.example.grossrecipes.data.local.AppDatabase
 import com.example.grossrecipes.data.local.ListDao
 import com.example.grossrecipes.data.local.ListEntity
@@ -73,6 +74,7 @@ import java.util.UUID
  * would each have their own, defeating the point of either.
  */
 class ListsRepository(
+    private val database: AppDatabase,
     private val listDao: ListDao,
     private val listItemDao: ListItemDao,
     private val outboxEventDao: OutboxEventDao,
@@ -90,6 +92,15 @@ class ListsRepository(
     // happened yet - this flag is what covers that gap.
     private val _isSyncing = MutableStateFlow(false)
     val isSyncing: StateFlow<Boolean> = _isSyncing.asStateFlow()
+
+    // The other gap pendingChangeCount alone can't cover: a PULL can fail
+    // (e.g. a rejected token, a server error) while the outbox is already
+    // empty, because there was nothing local to push in the first place -
+    // that leaves pendingChangeCount == 0 and isSyncing back to false right
+    // after the failure, which looked identical to "fully synced" before
+    // this existed. Cleared only by the next sync that actually succeeds.
+    private val _lastSyncError = MutableStateFlow<String?>(null)
+    val lastSyncError: StateFlow<String?> = _lastSyncError.asStateFlow()
 
     private fun api(serverUrl: String, accessToken: String) =
         createListsApi(serverUrl, accessToken, sessionManager)
@@ -238,7 +249,14 @@ class ListsRepository(
     private suspend fun syncPendingChangesLocked(serverUrl: String, accessToken: String): Result<Unit> {
         _isSyncing.value = true
         try {
-            return syncPendingChangesInner(serverUrl, accessToken)
+            val result = syncPendingChangesInner(serverUrl, accessToken)
+            // Cleared only on an actual success - a failed attempt (even one
+            // with nothing local to push, so pendingChangeCount stays 0
+            // throughout) leaves this set so the status doesn't silently
+            // revert to "Synced" the moment isSyncing goes back to false.
+            result.onSuccess { _lastSyncError.value = null }
+            result.onFailure { e -> _lastSyncError.value = e.message ?: "Sync failed" }
+            return result
         } finally {
             _isSyncing.value = false
         }
@@ -265,30 +283,41 @@ class ListsRepository(
             // SyncResponse groups events into Patches per list - flatten back
             // into one ordered stream to apply, same as before.
             val receivedEvents = body.serverEvents.flatMap { patch -> patch.events }
-            receivedEvents.forEach { event ->
-                // Assumes events arrive in the order they actually happened
-                // (so e.g. a ListItemCreated never arrives before its list's
-                // ListCreated) - if that's ever violated, skip just the one
-                // bad event instead of aborting the whole sync.
-                runCatching { applyEvent(event) }
+
+            // Everything from here down is one Room transaction - without
+            // this, observeLists() (backed by Room's own Flow) re-emits after
+            // EVERY individual upsert/delete as events get applied one at a
+            // time, so a big catch-up sync (first login, or reconnecting
+            // after a while) visibly flickered lists in and out as it worked
+            // through the list. Wrapping it means the UI only ever sees the
+            // state before the sync and the state after - nothing in between.
+            database.withTransaction {
+                receivedEvents.forEach { event ->
+                    // Assumes events arrive in the order they actually happened
+                    // (so e.g. a ListItemCreated never arrives before its list's
+                    // ListCreated) - if that's ever violated, skip just the one
+                    // bad event instead of aborting the whole sync.
+                    runCatching { applyEvent(event) }
+                }
+
+                // Your friend's merge algorithm: if someone else already added the
+                // same item (same list, name matching ignoring case/spacing)
+                // while we were both offline, we only find out now - too late to
+                // stop our own copy from having just been sent above. So instead
+                // we fold our copy into theirs: carry over any local state (like
+                // already being checked) onto their item, then drop ours, so only
+                // one row shows up on screen from here on.
+                reconcileDuplicateItems(outbox.map { it.event }, receivedEvents)
+
+                // Everything above was just sent to the server as part of this
+                // same request - durable now, so this phone doesn't need to
+                // remember any of it (including anything just merged away).
+                outbox.forEach { outboxEventDao.deleteBySeq(it.seq) }
             }
-
-            // Your friend's merge algorithm: if someone else already added the
-            // same item (same list, name matching ignoring case/spacing)
-            // while we were both offline, we only find out now - too late to
-            // stop our own copy from having just been sent above. So instead
-            // we fold our copy into theirs: carry over any local state (like
-            // already being checked) onto their item, then drop ours, so only
-            // one row shows up on screen from here on.
-            reconcileDuplicateItems(outbox.map { it.event }, receivedEvents)
-
-            // Everything above was just sent to the server as part of this
-            // same request - durable now, so this phone doesn't need to
-            // remember any of it (including anything just merged away).
-            outbox.forEach { outboxEventDao.deleteBySeq(it.seq) }
 
             // Server-stamped cursor (added in 0.6) - same reasoning as our old
             // backend's serverTime: never trust a client's own clock for this.
+            // DataStore, not Room, so it's outside the transaction above.
             syncStateManager.setLastSync(body.syncDate)
 
             Result.success(Unit)
@@ -307,8 +336,10 @@ class ListsRepository(
      * this directly.
      */
     private suspend fun applyAndQueue(event: Event) {
-        applyEvent(event)
-        outboxEventDao.insert(OutboxEventEntity(event = event))
+        database.withTransaction {
+            applyEvent(event)
+            outboxEventDao.insert(OutboxEventEntity(event = event))
+        }
     }
 
     private suspend fun reconcileDuplicateItems(pushedEvents: List<Event>, receivedEvents: List<Event>) {
@@ -448,6 +479,7 @@ class ListsRepository(
                     val appContext = context.applicationContext
                     val database = AppDatabase.getInstance(appContext)
                     ListsRepository(
+                        database,
                         database.listDao(),
                         database.listItemDao(),
                         database.outboxEventDao(),
