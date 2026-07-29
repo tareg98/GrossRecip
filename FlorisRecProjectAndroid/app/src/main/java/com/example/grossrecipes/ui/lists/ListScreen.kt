@@ -37,7 +37,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -68,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
+import com.example.grossrecipes.navigation.LocalBottomBarHeight
 import com.example.grossrecipes.ui.theme.Accent
 import com.example.grossrecipes.ui.theme.Accent2
 import com.example.grossrecipes.ui.theme.Accent2Deep
@@ -124,36 +124,30 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
         }
     }
 
-    Scaffold(
-        snackbarHost = {
-            SnackbarHost(snackbarHostState) { data ->
-                Snackbar(snackbarData = data)
-            }
-        },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = { showNewListDialog = true },
-                shape = CircleShape,
-                containerColor = Accent,
-                modifier = Modifier.size(56.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "New list", tint = Background)
-            }
-        }
-    ) { innerPadding ->
+    // No Scaffold here - Scaffold reserves its own top+bottom system bar
+    // insets via innerPadding regardless of whether bottomBar/topBar slots
+    // are used, and that was stacking on top of AppNavGraph's own insets one
+    // level up. That double-counted bottom inset is what made the floating
+    // nav bar look huge (extra blank block under it) and squeezed this
+    // screen's own box short, which is what put the FAB in the middle of the
+    // screen and clipped list items right at the boundary while typing.
+    // A plain Box with the FAB/snackbar/scroll-end clearance pinned to the
+    // bar's real measured height (LocalBottomBarHeight, set in AppNavGraph)
+    // replaces all of that - a guessed 96dp fell short on this device
+    // because the bar's actual height (its own content plus the gesture/nav
+    // bar inset it pads itself by) came out taller than that guess, so the
+    // bar covered the bottom of the FAB and ate into the list's last bit of
+    // scrollable space.
+    val bottomBarHeight = LocalBottomBarHeight.current
+    val bottomClearance = bottomBarHeight + 16.dp
+
+    Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             state = lazyListState,
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp)
-                // enableEdgeToEdge() means the window no longer resizes itself
-                // around the keyboard (that's what android:windowSoftInputMode
-                // ="adjustResize" used to do) - without this, the keyboard
-                // just overlaps the bottom of the screen with nothing pushing
-                // content up, so a field near the bottom was unreachable and
-                // unreadable while typing. This reserves that space instead.
-                .imePadding(),
+                .imePadding()
+                .padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             item {
@@ -194,7 +188,28 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                 }
             }
 
-            item { Spacer(Modifier.height(80.dp)) }
+            item { Spacer(Modifier.height(bottomClearance)) }
+        }
+
+        FloatingActionButton(
+            onClick = { showNewListDialog = true },
+            shape = CircleShape,
+            containerColor = Accent,
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = bottomClearance)
+                .size(56.dp)
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "New list", tint = Background)
+        }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = bottomClearance)
+        ) { data ->
+            Snackbar(snackbarData = data)
         }
     }
 
@@ -290,18 +305,23 @@ private fun ListCard(
         ) {
             ListAvatar(list = list, onColorChange = onColorChange)
             Spacer(Modifier.width(10.dp))
-            Text(
-                text = list.name,
-                style = MaterialTheme.typography.titleMedium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false)
-            )
-            if (list.sharedWith.isNotEmpty() || list.sharedExternally) {
-                Spacer(Modifier.width(8.dp))
-                SharedTag()
+            // Title gets its own column with the full weight to itself - the
+            // "Shared" tag used to sit in this same row competing for space,
+            // which squeezed the title down to just a few letters before
+            // ellipsis on anything but a very short name. It now sits on its
+            // own line below the title instead, never touching its width.
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = list.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (list.sharedWith.isNotEmpty() || list.sharedExternally) {
+                    Spacer(Modifier.height(4.dp))
+                    SharedTag()
+                }
             }
-            Spacer(Modifier.weight(1f))
             IconButton(onClick = onShareClick) {
                 Icon(Icons.Default.Share, contentDescription = "Share list")
             }

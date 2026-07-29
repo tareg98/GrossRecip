@@ -136,12 +136,17 @@ fun ShareDialog(
             Text("Or share via", style = MaterialTheme.typography.bodyMedium, color = MutedText)
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                // Each of these used to call the exact same generic system
+                // sheet, making them three identical buttons - now Messages
+                // and Mail go straight to their own app (no picker at all),
+                // and only "More" falls back to letting the user pick from
+                // everything installed that can handle shared text.
                 ShareViaIcon(icon = Icons.Default.MailOutline, contentDescription = "Share via Messages") {
-                    shareListViaSystemSheet(context, list)
+                    shareListViaSms(context, list)
                     onSharedExternally()
                 }
                 ShareViaIcon(icon = Icons.Default.Email, contentDescription = "Share via Mail") {
-                    shareListViaSystemSheet(context, list)
+                    shareListViaEmail(context, list)
                     onSharedExternally()
                 }
                 ShareViaIcon(icon = Icons.Default.MoreHoriz, contentDescription = "More sharing options") {
@@ -179,12 +184,45 @@ private fun ShareViaIcon(icon: ImageVector, contentDescription: String, onClick:
     }
 }
 
-private fun shareListViaSystemSheet(context: android.content.Context, list: GroceryList) {
+private fun listShareText(list: GroceryList): String {
     val itemsSummary = list.items.joinToString("\n") { "- ${it.name}" }
-    val shareText = "Check out my grocery list \"${list.name}\":\n$itemsSummary"
+    return "Check out my grocery list \"${list.name}\":\n$itemsSummary"
+}
+
+/** Generic share sheet - shows every app installed that can handle shared text, not just SMS/Mail. */
+private fun shareListViaSystemSheet(context: android.content.Context, list: GroceryList) {
     val intent = Intent(Intent.ACTION_SEND).apply {
         type = "text/plain"
-        putExtra(Intent.EXTRA_TEXT, shareText)
+        putExtra(Intent.EXTRA_TEXT, listShareText(list))
     }
     context.startActivity(Intent.createChooser(intent, "Share list"))
+}
+
+/** Goes straight to the default messaging app - no picker, unlike the generic sheet above. */
+private fun shareListViaSms(context: android.content.Context, list: GroceryList) {
+    val intent = Intent(Intent.ACTION_SENDTO).apply {
+        data = android.net.Uri.parse("smsto:")
+        putExtra("sms_body", listShareText(list))
+    }
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        // No messaging app registered for smsto: - fall back rather than crash.
+        shareListViaSystemSheet(context, list)
+    }
+}
+
+/** Goes straight to an email app - no picker, unlike the generic sheet above. */
+private fun shareListViaEmail(context: android.content.Context, list: GroceryList) {
+    val intent = Intent(Intent.ACTION_SENDTO).apply {
+        data = android.net.Uri.parse("mailto:")
+        putExtra(Intent.EXTRA_SUBJECT, "Grocery list: ${list.name}")
+        putExtra(Intent.EXTRA_TEXT, listShareText(list))
+    }
+    try {
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        // No email app registered for mailto: - fall back rather than crash.
+        shareListViaSystemSheet(context, list)
+    }
 }
