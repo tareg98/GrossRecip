@@ -33,6 +33,13 @@ interface ListsApi {
  * expired) and retries the failed request once with the new access token. If
  * refresh itself fails, the session is cleared - the user has to log in
  * again next time they open the app.
+ *
+ * This is a plain Interceptor, not OkHttp's built-in Authenticator - the
+ * Authenticator hook only ever fires automatically for a real 401. This
+ * backend replies with 498 for an invalid/expired token instead, which
+ * Authenticator has no idea what to do with, so it silently never ran and
+ * the request just failed with the raw 498. An Interceptor sees every status
+ * code, so it can check for both itself.
  */
 fun createListsApi(serverUrl: String, accessToken: String, sessionManager: SessionManager): ListsApi {
     val baseUrl = if (serverUrl.endsWith("/")) serverUrl else "$serverUrl/"
@@ -43,13 +50,17 @@ fun createListsApi(serverUrl: String, accessToken: String, sessionManager: Sessi
             val request = chain.request().newBuilder()
                 .addHeader("Authorization", "Bearer $currentToken")
                 .build()
-            chain.proceed(request)
-        }
-        .authenticator { _, response ->
-            // Only try once - if a freshly-refreshed token still gets a 401,
-            // something else is wrong and we shouldn't loop forever.
-            if (response.priorResponse != null) return@authenticator null
+            val response = chain.proceed(request)
 
+            if (response.code != 401 && response.code != 498) {
+                return@addInterceptor response
+            }
+
+            // Only try once per request - if a freshly-refreshed token still
+            // gets rejected, something else is wrong and we shouldn't loop.
+            // response isn't closed yet here - if refresh fails, it gets
+            // returned as-is below so its body is still readable (that's
+            // what ListsRepository reads to show the real failure reason).
             val newToken = runBlocking {
                 try {
                     val refreshToken = sessionManager.currentSession().refreshToken
@@ -68,11 +79,15 @@ fun createListsApi(serverUrl: String, accessToken: String, sessionManager: Sessi
 
             if (newToken == null) {
                 runBlocking { sessionManager.logout() }
-                null
+                response
             } else {
-                response.request.newBuilder()
+                // Only discard the original response once we're actually
+                // replacing it with the retry's.
+                response.close()
+                val retryRequest = request.newBuilder()
                     .header("Authorization", "Bearer $newToken")
                     .build()
+                chain.proceed(retryRequest)
             }
         }
         .build()
