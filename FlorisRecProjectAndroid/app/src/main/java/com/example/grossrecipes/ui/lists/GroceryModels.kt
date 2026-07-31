@@ -21,7 +21,15 @@ data class GroceryList(
     val sharedWith: List<String> = emptyList(),
     val sharedExternally: Boolean = false,
     val items: List<GroceryItem> = emptyList(),
-    val checkedSectionExpanded: Boolean = false
+    val checkedSectionExpanded: Boolean = false,
+    // Dividers are a purely local organizational aid - never synced, so each
+    // device can lay a list out differently. topDivider is the one at the
+    // very top (before the first item); everything else is anchored to the
+    // stable id of the item right above it, not a raw index - an index would
+    // silently point at the wrong gap the moment an item above it is added,
+    // checked off, or removed.
+    val topDivider: Boolean = false,
+    val dividerAfterItemIds: Set<String> = emptySet()
 )
 
 val listColorPalette: List<Color> = listOf(Accent, Accent2, ListOchre, ListDustyBlue, ListPlum)

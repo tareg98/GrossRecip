@@ -10,11 +10,14 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface ListItemDao {
 
-    @Query("SELECT * FROM list_items")
+    @Query("SELECT * FROM list_items ORDER BY sortOrder ASC")
     fun observeAllItems(): Flow<List<ListItemEntity>>
 
-    @Query("SELECT * FROM list_items WHERE listId = :listId")
+    @Query("SELECT * FROM list_items WHERE listId = :listId ORDER BY sortOrder ASC")
     suspend fun getForList(listId: String): List<ListItemEntity>
+
+    @Query("SELECT COALESCE(MAX(sortOrder), -1) FROM list_items WHERE listId = :listId")
+    suspend fun maxSortOrder(listId: String): Int
 
     // Real @Upsert, not @Insert(onConflict = REPLACE) - see ListDao.upsert for
     // why REPLACE is dangerous with foreign keys (not the direct cause of the

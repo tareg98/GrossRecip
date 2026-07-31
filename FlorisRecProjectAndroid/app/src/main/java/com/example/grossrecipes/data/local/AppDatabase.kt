@@ -7,8 +7,14 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 
 @Database(
-    entities = [ListEntity::class, ListItemEntity::class, OutboxEventEntity::class],
-    version = 5,
+    entities = [
+        ListEntity::class,
+        ListItemEntity::class,
+        OutboxEventEntity::class,
+        DividerEntity::class,
+        KnownItemNameEntity::class
+    ],
+    version = 8,
     exportSchema = false
 )
 @TypeConverters(StringListConverter::class, EventConverter::class)
@@ -17,6 +23,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun listDao(): ListDao
     abstract fun listItemDao(): ListItemDao
     abstract fun outboxEventDao(): OutboxEventDao
+    abstract fun dividerDao(): DividerDao
+    abstract fun knownItemNameDao(): KnownItemNameDao
 
     companion object {
         @Volatile

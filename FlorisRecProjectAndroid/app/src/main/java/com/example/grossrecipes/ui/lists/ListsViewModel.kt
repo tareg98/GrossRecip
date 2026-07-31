@@ -176,6 +176,20 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.updateSortOrder(orderedListIds) }
     }
 
+    /** Same as [reorderLists], one level down - reordering items within a single list. Purely local - never synced. */
+    fun reorderItems(orderedItemIds: List<String>) {
+        viewModelScope.launch { repository.updateItemSortOrder(orderedItemIds) }
+    }
+
+    /**
+     * Toggles a divider at a gap in the list - [afterItemId] null means the
+     * very top, otherwise right after that item. Purely local, like
+     * [reorderLists] - never syncs anywhere.
+     */
+    fun toggleDivider(listId: String, afterItemId: String?) {
+        viewModelScope.launch { repository.toggleDivider(listId, afterItemId) }
+    }
+
     // Every action function's lambda already ends with a repository call that
     // returns Result<Unit> - previously that value just fell on the floor
     // here (block's declared return type was Unit), so a failed sync or

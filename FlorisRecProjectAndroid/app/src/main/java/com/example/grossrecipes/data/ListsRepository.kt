@@ -5,6 +5,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.room.withTransaction
 import com.example.grossrecipes.data.local.AppDatabase
+import com.example.grossrecipes.data.local.DividerDao
+import com.example.grossrecipes.data.local.DividerEntity
+import com.example.grossrecipes.data.local.KnownItemNameDao
+import com.example.grossrecipes.data.local.KnownItemNameEntity
 import com.example.grossrecipes.data.local.ListDao
 import com.example.grossrecipes.data.local.ListEntity
 import com.example.grossrecipes.data.local.ListItemDao
@@ -78,6 +82,8 @@ class ListsRepository(
     private val listDao: ListDao,
     private val listItemDao: ListItemDao,
     private val outboxEventDao: OutboxEventDao,
+    private val dividerDao: DividerDao,
+    private val knownItemNameDao: KnownItemNameDao,
     private val syncStateManager: SyncStateManager,
     private val sessionManager: SessionManager
 ) {
@@ -106,12 +112,23 @@ class ListsRepository(
         createListsApi(serverUrl, accessToken, sessionManager)
 
     fun observeLists(): Flow<List<GroceryList>> =
-        combine(listDao.observeLists(), listItemDao.observeAllItems()) { lists, items ->
-            lists.map { list -> list.toDomain(items.filter { it.listId == list.id }) }
+        combine(listDao.observeLists(), listItemDao.observeAllItems(), dividerDao.observeAll()) { lists, items, dividers ->
+            lists.map { list ->
+                val listDividers = dividers.filter { it.listId == list.id }
+                list.toDomain(
+                    items = items.filter { it.listId == list.id },
+                    topDivider = listDividers.any { it.afterItemId == null },
+                    dividerAfterItemIds = listDividers.mapNotNull { it.afterItemId }.toSet()
+                )
+            }
         }
 
+    // A permanent history, not just names of items that still exist - see
+    // KnownItemNameEntity's doc for why: deleting an item used to make its
+    // name stop suggesting itself entirely, which isn't what "autocomplete
+    // from what I've typed before" should mean.
     fun observeKnownItemNames(): Flow<List<String>> =
-        listItemDao.observeAllItems().map { items -> items.map { it.name }.distinct() }
+        knownItemNameDao.observeAll().map { names -> names.map { it.displayName } }
 
     // A row only ever leaves the outbox once a sync actually round-trips
     // successfully - so together with isSyncing, this is what "fully synced"
@@ -148,7 +165,27 @@ class ListsRepository(
 
     suspend fun addItem(serverUrl: String, accessToken: String, listId: String, itemName: String): Result<Unit> =
         syncMutex.withLock {
-            applyAndQueue(ListItemCreated(ZonedDateTime.now(), UUID.fromString(listId), UUID.randomUUID(), itemName))
+            val trimmedName = itemName.trim()
+            // Same name-matching rule already used to merge duplicate adds
+            // from two devices (reconcileDuplicateItems) - case/spacing
+            // insensitive. A match that's already checked off gets
+            // unchecked instead of creating a second copy of the same item;
+            // a match that's already sitting unchecked is left alone as-is -
+            // either way, typing a name that's already on the list doesn't
+            // produce a duplicate.
+            val existing = listItemDao.getForList(listId)
+                .firstOrNull { it.name.trim().equals(trimmedName, ignoreCase = true) }
+
+            when {
+                existing == null -> applyAndQueue(
+                    ListItemCreated(ZonedDateTime.now(), UUID.fromString(listId), UUID.randomUUID(), trimmedName)
+                )
+                existing.checked -> applyAndQueue(
+                    ListItemChecked(ZonedDateTime.now(), UUID.fromString(listId), UUID.fromString(existing.id), false)
+                )
+                else -> { /* already there, unchecked - nothing to do */ }
+            }
+
             syncPendingChangesLocked(serverUrl, accessToken)
         }
 
@@ -226,15 +263,45 @@ class ListsRepository(
         }
     }
 
+    /** Same reasoning as [updateSortOrder], one level down - which item comes first within a single list. */
+    suspend fun updateItemSortOrder(orderedItemIds: List<String>) {
+        orderedItemIds.forEachIndexed { index, id ->
+            val existing = listItemDao.getById(id)
+            if (existing != null && existing.sortOrder != index) {
+                listItemDao.upsert(existing.copy(sortOrder = index))
+            }
+        }
+    }
+
     /** Pure UI state (which list's checked-off section is expanded) - never an event, never synced. */
     suspend fun setCheckedSectionExpandedLocalOnly(listId: String, expanded: Boolean) {
         listDao.getById(listId)?.let { listDao.upsert(it.copy(checkedSectionExpanded = expanded)) }
+    }
+
+    /**
+     * Purely local, like [setCheckedSectionExpandedLocalOnly] and
+     * [updateSortOrder] - a divider is a personal organizational aid, not
+     * something gross-recipes-common has any concept of, so it never becomes
+     * an event and never syncs. [afterItemId] null means the very top of the
+     * list; otherwise it's anchored to that item's stable id rather than a
+     * raw position, so it stays attached to the same visual gap as items
+     * above it are added, checked off, or removed.
+     */
+    suspend fun toggleDivider(listId: String, afterItemId: String?) {
+        val existing = dividerDao.getAt(listId, afterItemId)
+        if (existing != null) {
+            dividerDao.deleteAt(listId, afterItemId)
+        } else {
+            dividerDao.upsert(DividerEntity(id = UUID.randomUUID().toString(), listId = listId, afterItemId = afterItemId))
+        }
     }
 
     /** Called on logout so a different account logging in on this phone doesn't see stale data. */
     suspend fun clearAllLocalData() = syncMutex.withLock {
         listDao.deleteAll()
         listItemDao.deleteAll()
+        dividerDao.deleteAll()
+        knownItemNameDao.deleteAll()
         outboxEventDao.deleteAll()
         syncStateManager.reset()
     }
@@ -442,17 +509,32 @@ class ListsRepository(
                 }
             }
             is ListItemCreated -> {
-                // Only if we actually have the parent list - if its ListCreated
-                // was filtered out above (a list that isn't ours), don't stash
-                // an orphaned item for it either.
-                if (listDao.getById(event.listId.toString()) != null) {
+                // Only if we actually have the parent list - if its
+                // ListCreated hasn't arrived yet (events out of order) or the
+                // list was since deleted locally, don't stash an orphaned item.
+                val listId = event.listId.toString()
+                if (listDao.getById(listId) != null) {
                     listItemDao.upsert(
                         ListItemEntity(
                             id = event.id.toString(),
-                            listId = event.listId.toString(),
+                            listId = listId,
                             name = event.name,
-                            checked = false
+                            checked = false,
+                            // Appends at the end by default, like a new list
+                            // itself does (ListDao.maxSortOrder) - a synced
+                            // item from another device lands wherever it
+                            // would visually make sense, at the bottom, not
+                            // wherever this device's drag-reordering (purely
+                            // local) happens to have things arranged.
+                            sortOrder = listItemDao.maxSortOrder(listId) + 1
                         )
+                    )
+                    // Recorded regardless of which device created this item -
+                    // autocomplete suggestions are shared across every list,
+                    // and this is the one place every item creation (local
+                    // or synced) passes through.
+                    knownItemNameDao.insertIfAbsent(
+                        KnownItemNameEntity(normalizedName = event.name.trim().lowercase(), displayName = event.name.trim())
                     )
                 }
             }
@@ -466,7 +548,14 @@ class ListsRepository(
                     listItemDao.upsert(existing.copy(checked = event.checked))
                 }
             }
-            is ListItemDeleted -> listItemDao.deleteById(event.listItemId.toString())
+            is ListItemDeleted -> {
+                listItemDao.deleteById(event.listItemId.toString())
+                // Any divider anchored to this item (see toggleDivider) would
+                // otherwise be left pointing at a row that no longer exists -
+                // not dangerous, just permanently orphaned, since nothing
+                // would ever match it again.
+                dividerDao.deleteByAnchorItem(event.listItemId.toString())
+            }
         }
     }
 
@@ -485,6 +574,8 @@ class ListsRepository(
                         database.listDao(),
                         database.listItemDao(),
                         database.outboxEventDao(),
+                        database.dividerDao(),
+                        database.knownItemNameDao(),
                         SyncStateManager(appContext),
                         SessionManager(appContext)
                     ).also { INSTANCE = it }
@@ -494,14 +585,20 @@ class ListsRepository(
     }
 }
 
-private fun ListEntity.toDomain(items: List<ListItemEntity>): GroceryList = GroceryList(
+private fun ListEntity.toDomain(
+    items: List<ListItemEntity>,
+    topDivider: Boolean,
+    dividerAfterItemIds: Set<String>
+): GroceryList = GroceryList(
     id = id,
     name = name,
     color = colorHex?.let { runCatching { Color(android.graphics.Color.parseColor(it)) }.getOrNull() },
     sharedWith = sharedWith,
     sharedExternally = sharedExternally,
     items = items.map { GroceryItem(id = it.id, name = it.name, checked = it.checked) },
-    checkedSectionExpanded = checkedSectionExpanded
+    checkedSectionExpanded = checkedSectionExpanded,
+    topDivider = topDivider,
+    dividerAfterItemIds = dividerAfterItemIds
 )
 
 private fun Color.toHex(): String = String.format("#%08X", this.toArgb())

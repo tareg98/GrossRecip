@@ -20,5 +20,9 @@ data class ListItemEntity(
     @PrimaryKey val id: String,
     val listId: String,
     val name: String,
-    val checked: Boolean
+    val checked: Boolean,
+    // Purely local, like ListEntity.sortOrder - gross-recipes-common has no
+    // concept of item ordering, so this never becomes an event and never
+    // syncs; each device can arrange the same list's items differently.
+    val sortOrder: Int = 0
 )

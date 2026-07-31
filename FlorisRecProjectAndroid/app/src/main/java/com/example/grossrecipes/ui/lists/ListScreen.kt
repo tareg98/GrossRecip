@@ -1,9 +1,14 @@
 package com.example.grossrecipes.ui.lists
 
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,8 +51,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.Alignment
@@ -55,16 +64,26 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.PointerInputScope
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.zIndex
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 import com.example.grossrecipes.navigation.LocalBottomBarHeight
@@ -183,7 +202,9 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                         onToggleCheckedSectionExpanded = {
                             viewModel.toggleCheckedSectionExpanded(list.id, !list.checkedSectionExpanded)
                         },
-                        onShareClick = { shareDialogListId = list.id }
+                        onShareClick = { shareDialogListId = list.id },
+                        onToggleDivider = { afterItemId -> viewModel.toggleDivider(list.id, afterItemId) },
+                        onReorderItems = { orderedItemIds -> viewModel.reorderItems(orderedItemIds) }
                     )
                 }
             }
@@ -293,7 +314,9 @@ private fun ListCard(
     onToggleChecked: (String, Boolean) -> Unit,
     onDeleteItem: (String) -> Unit,
     onToggleCheckedSectionExpanded: () -> Unit,
-    onShareClick: () -> Unit
+    onShareClick: () -> Unit,
+    onToggleDivider: (afterItemId: String?) -> Unit,
+    onReorderItems: (orderedItemIds: List<String>) -> Unit
 ) {
     val cardBg = list.color?.let { lerp(Surface, it, 0.22f) } ?: Surface
     val fieldBg = list.color?.let { lerp(Background, it, 0.10f) } ?: Background
@@ -351,19 +374,15 @@ private fun ListCard(
 
         if (uncheckedItems.isNotEmpty()) {
             Spacer(Modifier.height(8.dp))
-            Column {
-                uncheckedItems.forEachIndexed { index, item ->
-                    ItemRow(
-                        item = item,
-                        checkedStyle = false,
-                        onToggleChecked = { onToggleChecked(item.id, !item.checked) },
-                        onDelete = { onDeleteItem(item.id) }
-                    )
-                    if (index != uncheckedItems.lastIndex) {
-                        HorizontalDivider(color = DividerLight, thickness = 1.dp)
-                    }
-                }
-            }
+            UncheckedItemsSection(
+                items = uncheckedItems,
+                topDivider = list.topDivider,
+                dividerAfterItemIds = list.dividerAfterItemIds,
+                onToggleChecked = onToggleChecked,
+                onDeleteItem = onDeleteItem,
+                onToggleDivider = onToggleDivider,
+                onReorderItems = onReorderItems
+            )
         }
 
         if (checkedItems.isNotEmpty()) {
@@ -537,12 +556,303 @@ private fun AddItemField(fieldBg: Color, knownItemNames: List<String>, onAddItem
     }
 }
 
+/**
+ * Renders the unchecked items with any dividers interleaved between them,
+ * and owns three interactions: a two-finger pinch spanning a gap between
+ * adjacent items to toggle a divider there, a long-press on an item's name
+ * for a divider menu (the discoverable fallback for the pinch), and a
+ * dedicated drag handle to move an item to any position - hold and drag it
+ * up or down past its neighbors.
+ *
+ * Gap `i` (0..items.lastIndex) is the space right above items[i] - gap 0 is
+ * the very top of the list ([GroceryList.topDivider]), gap i>0 is right
+ * after items[i - 1]'s id ([GroceryList.dividerAfterItemIds]).
+ */
+@Composable
+private fun UncheckedItemsSection(
+    items: List<GroceryItem>,
+    topDivider: Boolean,
+    dividerAfterItemIds: Set<String>,
+    onToggleChecked: (String, Boolean) -> Unit,
+    onDeleteItem: (String) -> Unit,
+    onToggleDivider: (afterItemId: String?) -> Unit,
+    onReorderItems: (orderedItemIds: List<String>) -> Unit
+) {
+    // Local drag order - same pattern as ListsScreen's whole-list reordering:
+    // reorder this copy instantly for a smooth visual while dragging, push
+    // the final order up once the finger lifts, and re-sync with the real
+    // data whenever that changes underneath (an item added/checked off/
+    // deleted, or a pull from the server).
+    var orderedItems by remember { mutableStateOf(items) }
+    var draggingIndex by remember { mutableStateOf<Int?>(null) }
+    LaunchedEffect(items) {
+        // Skip the re-sync while a drag is actively in progress - a sync
+        // landing mid-gesture shouldn't yank the row out from under the
+        // finger still dragging it.
+        if (draggingIndex == null) orderedItems = items
+    }
+
+    // Each item row's current top-Y, in this Column's own coordinate space -
+    // the same space the pinch gesture's pointer events arrive in - captured
+    // live off actual layout so the gesture always lines up with what's on
+    // screen, even as dividers add or remove rows above a given item.
+    val gapPositions = remember { mutableStateMapOf<Int, Float>() }
+    var menuGapIndex by remember { mutableStateOf<Int?>(null) }
+    var dragOffsetPx by remember { mutableStateOf(0f) }
+
+    // pointerInput below only restarts when the item ids themselves change
+    // (added/removed) - which is correct, since the gaps are tied to item
+    // identity - but topDivider/dividerAfterItemIds change on every toggle,
+    // and orderedItems changes on every drag swap, without the id SET
+    // changing at all. Without rememberUpdatedState, the pinch gesture's
+    // long-lived coroutine would keep reading whatever those values were the
+    // moment it last launched, so a divider toggled via the long-press menu,
+    // or an item just dragged elsewhere, could look stale to the very next
+    // pinch gesture.
+    val currentItems = rememberUpdatedState(orderedItems)
+    val currentTopDivider = rememberUpdatedState(topDivider)
+    val currentDividerAfterItemIds = rememberUpdatedState(dividerAfterItemIds)
+
+    fun anchorFor(gapIndex: Int): String? =
+        if (gapIndex == 0) null else currentItems.value[gapIndex - 1].id
+    fun hasDividerAt(gapIndex: Int): Boolean =
+        if (gapIndex == 0) currentTopDivider.value
+        else currentDividerAfterItemIds.value.contains(currentItems.value[gapIndex - 1].id)
+
+    // A rough, fixed estimate of a row's height rather than something
+    // measured live - good enough to decide "has this drag crossed into the
+    // next row" and simpler than keeping per-row heights in sync mid-drag.
+    val density = LocalDensity.current
+    val estimatedRowHeightPx = remember(density) { with(density) { 48.dp.toPx() } }
+
+    Column(
+        modifier = Modifier.pointerInput(items.map { it.id }) {
+            detectDividerPinch(
+                gapPositions = { gapPositions },
+                hasDividerAt = ::hasDividerAt,
+                onToggle = { gapIndex -> onToggleDivider(anchorFor(gapIndex)) }
+            )
+        }
+    ) {
+        orderedItems.forEachIndexed { index, item ->
+            if (hasDividerAt(index)) {
+                DividerRow()
+            }
+            // Keyed by the item's own stable id, not just its position in
+            // this loop - without this, swapping two items during a drag
+            // makes Compose treat "slot 2" as still being the same
+            // composable it always was, just fed different data, instead of
+            // recognizing that the item which WAS at slot 2 has moved to
+            // slot 3. That mismatch changes this row's pointerInput key
+            // mid-gesture (the item's id at this slot just changed), which
+            // cancels the in-flight drag and fires onDragCancel - which is
+            // exactly what "pulls, then instantly snaps back" was: the very
+            // first swap cancelled the gesture and reset everything.
+            key(item.id) {
+                val isDragging = draggingIndex == index
+                Box(
+                    modifier = Modifier
+                        .onGloballyPositioned { coordinates ->
+                            gapPositions[index] = coordinates.positionInParent().y
+                        }
+                        .zIndex(if (isDragging) 1f else 0f)
+                        .offset { IntOffset(0, if (isDragging) dragOffsetPx.roundToInt() else 0) }
+                ) {
+                    ItemRow(
+                        item = item,
+                        checkedStyle = false,
+                        onToggleChecked = { onToggleChecked(item.id, !item.checked) },
+                        onDelete = { onDeleteItem(item.id) },
+                        onLongPress = { menuGapIndex = index },
+                        dragHandleModifier = Modifier.pointerInput(item.id) {
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    draggingIndex = orderedItems.indexOfFirst { it.id == item.id }
+                                    dragOffsetPx = 0f
+                                },
+                                onDrag = { change, dragAmount ->
+                                    change.consume()
+                                    dragOffsetPx += dragAmount.y
+
+                                    // Move one slot at a time whenever the drag
+                                    // crosses half a row past its current spot,
+                                    // compensating the offset by exactly one row
+                                    // each time so the item doesn't visually jump -
+                                    // it just keeps tracking the finger smoothly
+                                    // across however many rows it passes.
+                                    while (dragOffsetPx > estimatedRowHeightPx / 2 &&
+                                        (draggingIndex ?: 0) < orderedItems.lastIndex
+                                    ) {
+                                        val from = draggingIndex ?: return@detectDragGesturesAfterLongPress
+                                        val to = from + 1
+                                        orderedItems = orderedItems.toMutableList().apply {
+                                            add(to, removeAt(from))
+                                        }
+                                        draggingIndex = to
+                                        dragOffsetPx -= estimatedRowHeightPx
+                                    }
+                                    while (dragOffsetPx < -estimatedRowHeightPx / 2 &&
+                                        (draggingIndex ?: 0) > 0
+                                    ) {
+                                        val from = draggingIndex ?: return@detectDragGesturesAfterLongPress
+                                        val to = from - 1
+                                        orderedItems = orderedItems.toMutableList().apply {
+                                            add(to, removeAt(from))
+                                        }
+                                        draggingIndex = to
+                                        dragOffsetPx += estimatedRowHeightPx
+                                    }
+                                },
+                                onDragEnd = {
+                                    onReorderItems(orderedItems.map { it.id })
+                                    draggingIndex = null
+                                    dragOffsetPx = 0f
+                                },
+                                onDragCancel = {
+                                    // Discard the in-progress reorder - re-sync
+                                    // back to the real order next recomposition
+                                    // via the LaunchedEffect(items) above.
+                                    orderedItems = items
+                                    draggingIndex = null
+                                    dragOffsetPx = 0f
+                                }
+                            )
+                        }
+                    )
+                }
+            }
+            if (index != orderedItems.lastIndex) {
+                HorizontalDivider(color = DividerLight, thickness = 1.dp)
+            }
+        }
+    }
+
+    val gapIndex = menuGapIndex
+    if (gapIndex != null) {
+        val exists = hasDividerAt(gapIndex)
+        // Without an explicit alignment/offset, Popup anchors itself to the
+        // top-left of the whole card instead of the gap you actually
+        // long-pressed on - which is why it was showing up on top of the
+        // card's header row instead of next to the item you were touching.
+        // gapPositions already tracks each item's real on-screen Y (recorded
+        // for the pinch gesture), so reuse it here to land the menu in the
+        // right spot.
+        Popup(
+            alignment = Alignment.TopStart,
+            offset = IntOffset(0, gapPositions[gapIndex]?.roundToInt() ?: 0),
+            onDismissRequest = { menuGapIndex = null }
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(CardShape)
+                    .background(Surface)
+                    .border(1.dp, DividerLight, CardShape)
+            ) {
+                Text(
+                    text = if (exists) "Remove divider above" else "Add divider above",
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .clickable {
+                            onToggleDivider(anchorFor(gapIndex))
+                            menuGapIndex = null
+                        }
+                        .padding(horizontal = 16.dp, vertical = 12.dp)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Watches for exactly two fingers down over this Column and measures how the
+ * vertical distance between them changes from where they started - spreading
+ * them apart past [thresholdPx] inserts a divider at whichever gap between
+ * items they're centered over; pinching them back together past that same
+ * threshold removes one that's already there. Locks onto the gap it started
+ * over for the rest of the gesture (so drifting fingers can't jump to a
+ * different gap mid-pinch) and only fires once per gesture.
+ */
+private suspend fun PointerInputScope.detectDividerPinch(
+    gapPositions: () -> Map<Int, Float>,
+    hasDividerAt: (Int) -> Boolean,
+    onToggle: (Int) -> Unit
+) {
+    val thresholdPx = 60.dp.toPx()
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        var lockedGap: Int? = null
+        var initialDistance: Float? = null
+        var handled = false
+
+        while (true) {
+            val event = awaitPointerEvent()
+            val pressed = event.changes.filter { it.pressed }
+
+            if (pressed.size < 2) {
+                if (event.changes.all { !it.pressed }) break
+                continue
+            }
+
+            val p1 = pressed[0].position
+            val p2 = pressed[1].position
+            val avgY = (p1.y + p2.y) / 2f
+            val distance = abs(p1.y - p2.y)
+
+            if (lockedGap == null) {
+                lockedGap = gapPositions().minByOrNull { (_, y) -> abs(y - avgY) }?.key
+                initialDistance = distance
+            }
+
+            val gap = lockedGap
+            val startDistance = initialDistance
+            if (gap != null && startDistance != null && !handled) {
+                val delta = distance - startDistance
+                val dividerExists = hasDividerAt(gap)
+                if (!dividerExists && delta > thresholdPx) {
+                    onToggle(gap)
+                    handled = true
+                } else if (dividerExists && delta < -thresholdPx) {
+                    onToggle(gap)
+                    handled = true
+                }
+            }
+
+            event.changes.forEach { change ->
+                if (change.positionChanged()) change.consume()
+            }
+        }
+    }
+}
+
+/** Purely visual - a dashed rule marking a user-placed divider between items. */
+@Composable
+private fun DividerRow() {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 8.dp)
+            .height(1.dp)
+            .drawBehind {
+                drawLine(
+                    color = MutedText,
+                    start = Offset(0f, size.height / 2f),
+                    end = Offset(size.width, size.height / 2f),
+                    strokeWidth = 2.dp.toPx(),
+                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 6f))
+                )
+            }
+    )
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ItemRow(
     item: GroceryItem,
     checkedStyle: Boolean,
     onToggleChecked: () -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onLongPress: (() -> Unit)? = null,
+    dragHandleModifier: Modifier? = null
 ) {
     Row(
         modifier = Modifier
@@ -576,12 +886,30 @@ private fun ItemRow(
             style = MaterialTheme.typography.bodyLarge,
             color = if (checkedStyle) DisabledText else PrimaryText,
             textDecoration = if (checkedStyle) TextDecoration.LineThrough else null,
-            modifier = Modifier.weight(1f)
+            modifier = Modifier
+                .weight(1f)
+                .then(
+                    if (onLongPress != null) {
+                        Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress)
+                    } else {
+                        Modifier
+                    }
+                )
         )
         if (!checkedStyle) {
             IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
                 Icon(Icons.Default.Close, contentDescription = "Delete item", modifier = Modifier.size(16.dp))
             }
+        }
+        if (dragHandleModifier != null) {
+            Icon(
+                imageVector = Icons.Default.DragHandle,
+                contentDescription = "Drag to reorder",
+                tint = MutedText,
+                modifier = dragHandleModifier
+                    .padding(start = 4.dp)
+                    .size(20.dp)
+            )
         }
     }
 }
