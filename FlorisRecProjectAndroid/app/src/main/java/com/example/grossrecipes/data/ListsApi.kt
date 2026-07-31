@@ -69,7 +69,14 @@ fun createListsApi(serverUrl: String, accessToken: String, sessionManager: Sessi
                     val refreshResponse = accountApi.refresh()
                     if (!refreshResponse.isSuccessful) return@runBlocking null
                     val bodyText = refreshResponse.body()?.string() ?: return@runBlocking null
-                    val refreshed = com.google.gson.Gson().fromJson(bodyText, String::class.java)
+                    // parseServerString unwraps the same {"value": "..."}
+                    // envelope discovered on register's response - if refresh
+                    // turns out wrapped the same way, the old raw
+                    // Gson().fromJson(bodyText, String::class.java) here would
+                    // throw on a JSON object, get swallowed below, and look
+                    // exactly like a failed refresh even with a perfectly
+                    // good new token sitting in the body.
+                    val refreshed = parseServerString(bodyText) ?: return@runBlocking null
                     sessionManager.updateAccessToken(refreshed)
                     refreshed
                 } catch (e: Exception) {

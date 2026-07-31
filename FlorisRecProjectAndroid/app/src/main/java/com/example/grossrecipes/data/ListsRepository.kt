@@ -280,8 +280,12 @@ class ListsRepository(
             }
             val body: SyncResponse = response.body() ?: return Result.failure(Exception("Sync failed: empty response from server"))
 
-            // SyncResponse groups events into Patches per list - flatten back
-            // into one ordered stream to apply, same as before.
+            // No client-side relevance filtering on what the server sends
+            // back - deciding who's allowed to see what is the backend's job,
+            // not something the client should be quietly re-checking (and
+            // possibly masking a real leak behind, if the server ever gets it
+            // wrong - filtering it out here would just hide that from
+            // testing instead of surfacing it). Whatever comes back gets applied.
             val receivedEvents = body.serverEvents.flatMap { patch -> patch.events }
 
             // Everything from here down is one Room transaction - without
@@ -378,15 +382,13 @@ class ListsRepository(
     private suspend fun applyEvent(event: Event) {
         when (event) {
             is ListCreated -> {
-                // The server is supposed to only ever hand us events for lists
-                // we own or are shared with - but if it doesn't filter that
-                // correctly (or ever regresses), this is the one place a list
-                // enters our database for the first time, so it's the one
-                // place that must check. Skip anything that isn't ours instead
-                // of trusting the server's scoping blindly.
-                val me = sessionManager.currentSession().username
-                if (event.owner != me && me !in event.sharedWith) return
-
+                // No ownership/sharedWith check here - the backend decides
+                // who's allowed to receive which events, not the client.
+                // (There used to be a check here that only looked at this
+                // one event's own sharedWith snapshot, which is empty at
+                // creation time - that's what silently dropped lists shared
+                // with me later, since a following ListShared for the same
+                // list had nothing locally to attach to.)
                 val id = event.listId.toString()
                 val existing = listDao.getById(id)
                 listDao.upsert(

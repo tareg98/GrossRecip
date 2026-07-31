@@ -40,6 +40,7 @@ import com.example.grossrecipes.data.AuthOutcome
 import com.example.grossrecipes.data.SessionManager
 import com.example.grossrecipes.data.createAccountApi
 import com.example.grossrecipes.data.dto.Credentials
+import com.example.grossrecipes.data.lookupUsername
 import com.example.grossrecipes.data.parseAuthResponse
 import com.example.grossrecipes.ui.theme.Accent
 import com.example.grossrecipes.ui.theme.Accent2
@@ -186,6 +187,25 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
                     isSigningUp = true
                     errorMessage = null
                     try {
+                        // Checked separately, before ever calling register -
+                        // the backend's register endpoint appears to log
+                        // straight into an existing account instead of
+                        // rejecting the attempt when the username's already
+                        // taken, which made Sign Up look like it was quietly
+                        // doing a login. This blocks that case client-side
+                        // regardless of what register itself does, by
+                        // refusing to even call it once the username's
+                        // confirmed to already exist. (Lookup endpoint isn't
+                        // confirmed with the backend yet - if it errors or
+                        // isn't implemented, this just falls through to the
+                        // normal register attempt below rather than blocking
+                        // sign-up entirely.)
+                        val existing = lookupUsername(serverUrl, username = username).getOrNull()
+                        if (existing != null) {
+                            errorMessage = "An account with that username already exists. Log in instead."
+                            return@launch
+                        }
+
                         val api = createAccountApi(serverUrl)
                         val response = api.register(Credentials(username, password))
                         when (val outcome = parseAuthResponse(response)) {

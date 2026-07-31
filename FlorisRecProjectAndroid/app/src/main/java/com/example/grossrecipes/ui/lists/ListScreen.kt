@@ -228,7 +228,13 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
         ShareDialog(
             list = shareDialogList,
             onDismiss = { shareDialogListId = null },
-            onShare = { username -> viewModel.shareList(shareDialogList.id, username) },
+            onLookupUsername = { typed -> viewModel.lookupUsername(typed) },
+            // The resolved userId isn't wired into the share event itself
+            // yet - ListShared (gross-recipes-common) only carries a
+            // username - so it's just proof the typed name is a real
+            // account before we bother sharing at all. Only the username
+            // goes to the existing share call below.
+            onShare = { username, _ -> viewModel.shareList(shareDialogList.id, username) },
             onUnshare = { username -> viewModel.unshareList(shareDialogList.id, username) },
             onSharedExternally = { viewModel.markSharedExternally(shareDialogList.id) }
         )

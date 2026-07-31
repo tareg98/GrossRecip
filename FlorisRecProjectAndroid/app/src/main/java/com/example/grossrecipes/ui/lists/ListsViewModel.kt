@@ -134,6 +134,19 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.setCheckedSectionExpandedLocalOnly(listId, expanded) }
     }
 
+    /**
+     * Resolves a typed username to their UUID before ShareDialog will let
+     * the user actually add them - see AccountApi.lookupUsername for the
+     * placeholder endpoint/response handling this calls into.
+     */
+    suspend fun lookupUsername(username: String): Result<String?> {
+        val session = sessionManager.currentSession()
+        if (!session.isLoggedIn || session.accessToken == null) {
+            return Result.failure(Exception("Not logged in"))
+        }
+        return com.example.grossrecipes.data.lookupUsername(session.serverUrl, session.accessToken, username)
+    }
+
     fun shareList(listId: String, username: String) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->

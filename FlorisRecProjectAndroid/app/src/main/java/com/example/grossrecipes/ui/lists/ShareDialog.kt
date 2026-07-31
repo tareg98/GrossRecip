@@ -27,12 +27,14 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,17 +52,52 @@ import com.example.grossrecipes.ui.theme.Divider
 import com.example.grossrecipes.ui.theme.MutedText
 import com.example.grossrecipes.ui.theme.PillShape
 import com.example.grossrecipes.ui.theme.Surface
+import kotlinx.coroutines.launch
 
 @Composable
 fun ShareDialog(
     list: GroceryList,
     onDismiss: () -> Unit,
-    onShare: (String) -> Unit,
+    onLookupUsername: suspend (String) -> Result<String?>,
+    onShare: (username: String, userId: String) -> Unit,
     onUnshare: (String) -> Unit,
     onSharedExternally: () -> Unit
 ) {
     var username by remember { mutableStateOf("") }
+    var isLookingUp by remember { mutableStateOf(false) }
+    var lookupError by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // Resolves the typed username against the backend before actually
+    // sharing - see AccountApi.lookupUsername. Only calls onShare once a
+    // real user (with a real UUID) is confirmed to exist, instead of
+    // trusting whatever text was typed and finding out it was wrong only
+    // once the share event fails to mean anything on the other end.
+    val submitUsername = {
+        val typed = username.trim()
+        if (typed.isNotBlank() && !isLookingUp) {
+            isLookingUp = true
+            lookupError = null
+            coroutineScope.launch {
+                onLookupUsername(typed).fold(
+                    onSuccess = { userId ->
+                        isLookingUp = false
+                        if (userId == null) {
+                            lookupError = "No user found with that username"
+                        } else {
+                            onShare(typed, userId)
+                            username = ""
+                        }
+                    },
+                    onFailure = { e ->
+                        isLookingUp = false
+                        lookupError = e.message ?: "Lookup failed"
+                    }
+                )
+            }
+        }
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -75,32 +112,45 @@ fun ShareDialog(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedTextField(
                     value = username,
-                    onValueChange = { username = it },
+                    onValueChange = {
+                        username = it
+                        lookupError = null
+                    },
                     placeholder = { Text("Username, e.g. laura") },
                     singleLine = true,
+                    enabled = !isLookingUp,
+                    isError = lookupError != null,
                     shape = PillShape,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                    keyboardActions = KeyboardActions(onDone = {
-                        if (username.isNotBlank()) {
-                            onShare(username.trim())
-                            username = ""
-                        }
-                    }),
+                    keyboardActions = KeyboardActions(onDone = { submitUsername() }),
                     modifier = Modifier.weight(1f)
                 )
                 Spacer(Modifier.width(8.dp))
                 Button(
-                    onClick = {
-                        if (username.isNotBlank()) {
-                            onShare(username.trim())
-                            username = ""
-                        }
-                    },
+                    onClick = { submitUsername() },
+                    enabled = !isLookingUp,
                     shape = PillShape,
                     colors = ButtonDefaults.buttonColors(containerColor = Accent)
                 ) {
-                    Text("Add")
+                    if (isLookingUp) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Surface,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Add")
+                    }
                 }
+            }
+
+            if (lookupError != null) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = lookupError!!,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
             }
 
             if (list.sharedWith.isNotEmpty()) {
