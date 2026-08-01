@@ -7,4 +7,8 @@
     <color name="teal_700">#FF018786</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <!-- Sampled from the app logo's own background fill, so the adaptive
+         icon's background layer matches the logo seamlessly with no visible
+         seam around the inset foreground image. -->
+    <color name="ic_launcher_background">#FFD03B</color>
 </resources>
