@@ -31,7 +31,9 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -59,6 +61,7 @@ fun ShareDialog(
     list: GroceryList,
     onDismiss: () -> Unit,
     onLookupUsername: suspend (String) -> Result<String?>,
+    onLookupUserId: suspend (String) -> Result<String?>,
     onShare: (username: String, userId: String) -> Unit,
     onUnshare: (String) -> Unit,
     onSharedExternally: () -> Unit
@@ -68,6 +71,21 @@ fun ShareDialog(
     var lookupError by remember { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
+
+    // list.sharedWith now holds each person's UUID (see
+    // ListsRepository.shareList), not their username - resolve each one to
+    // a display name for the pills below. Keyed by UUID so this doesn't
+    // re-fetch names it already has whenever sharedWith changes length.
+    // Falls back to showing the raw UUID for anyone still loading or whose
+    // name failed to resolve, rather than hiding them.
+    val resolvedNames = remember { mutableStateMapOf<String, String>() }
+    LaunchedEffect(list.sharedWith) {
+        list.sharedWith.filter { it !in resolvedNames }.forEach { userId ->
+            onLookupUserId(userId).onSuccess { name ->
+                if (name != null) resolvedNames[userId] = name
+            }
+        }
+    }
 
     // Resolves the typed username against the backend before actually
     // sharing - see AccountApi.lookupUsername. Only calls onShare once a
@@ -157,6 +175,10 @@ fun ShareDialog(
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     list.sharedWith.forEach { person ->
+                        // person is the raw UUID (what's actually stored and
+                        // what onUnshare needs) - displayName is just what's
+                        // shown, resolved via lookup-by-id above.
+                        val displayName = resolvedNames[person] ?: person
                         Row(
                             modifier = Modifier
                                 .clip(PillShape)
@@ -164,11 +186,11 @@ fun ShareDialog(
                                 .padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(person, style = MaterialTheme.typography.labelMedium, color = Accent2Deep)
+                            Text(displayName, style = MaterialTheme.typography.labelMedium, color = Accent2Deep)
                             Spacer(Modifier.width(4.dp))
                             Icon(
                                 imageVector = Icons.Default.Close,
-                                contentDescription = "Remove $person",
+                                contentDescription = "Remove $displayName",
                                 tint = Accent2Deep,
                                 modifier = Modifier
                                     .size(14.dp)

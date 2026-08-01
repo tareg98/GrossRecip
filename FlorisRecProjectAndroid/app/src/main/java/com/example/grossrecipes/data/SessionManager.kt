@@ -13,6 +13,13 @@ private val Context.dataStore by preferencesDataStore(name = "session")
 data class Session(
     val serverUrl: String = "",
     val username: String = "",
+    // The logged-in user's own UUID - resolved via lookupUsername right
+    // after login/register succeeds (see LoginScreen/SignUpScreen), since
+    // the login response itself only confirms who you are by username, not
+    // by id. Needed so ListShared/ListUnshared events (which now carry a
+    // userId, not a username - see ListsRepository.shareList) can tell
+    // whether an incoming one is about "me".
+    val userId: String = "",
     val accessToken: String? = null,
     val refreshToken: String? = null
 ) {
@@ -27,6 +34,7 @@ class SessionManager(private val context: Context) {
     private object Keys {
         val SERVER_URL = stringPreferencesKey("server_url")
         val USERNAME = stringPreferencesKey("username")
+        val USER_ID = stringPreferencesKey("user_id")
         val ACCESS_TOKEN = stringPreferencesKey("access_token")
         val REFRESH_TOKEN = stringPreferencesKey("refresh_token")
         val RECENT_LOGINS = stringPreferencesKey("recent_logins")
@@ -36,6 +44,7 @@ class SessionManager(private val context: Context) {
         Session(
             serverUrl = prefs[Keys.SERVER_URL] ?: "",
             username = prefs[Keys.USERNAME] ?: "",
+            userId = prefs[Keys.USER_ID] ?: "",
             accessToken = prefs[Keys.ACCESS_TOKEN],
             refreshToken = prefs[Keys.REFRESH_TOKEN]
         )
@@ -71,10 +80,11 @@ class SessionManager(private val context: Context) {
         }
     }
 
-    suspend fun saveLogin(serverUrl: String, username: String, accessToken: String, refreshToken: String) {
+    suspend fun saveLogin(serverUrl: String, username: String, userId: String, accessToken: String, refreshToken: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.SERVER_URL] = serverUrl
             prefs[Keys.USERNAME] = username
+            prefs[Keys.USER_ID] = userId
             prefs[Keys.ACCESS_TOKEN] = accessToken
             prefs[Keys.REFRESH_TOKEN] = refreshToken
         }
@@ -84,6 +94,19 @@ class SessionManager(private val context: Context) {
     suspend fun updateAccessToken(newAccessToken: String) {
         context.dataStore.edit { prefs ->
             prefs[Keys.ACCESS_TOKEN] = newAccessToken
+        }
+    }
+
+    /**
+     * Fills in the userId for a session that doesn't have one yet - either an
+     * existing login from before this field existed, or a login where the
+     * self-lookup happened to fail right after signing in. See
+     * ListsRepository's self-heal call at the top of every sync for where
+     * this actually gets invoked.
+     */
+    suspend fun saveUserId(userId: String) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.USER_ID] = userId
         }
     }
 

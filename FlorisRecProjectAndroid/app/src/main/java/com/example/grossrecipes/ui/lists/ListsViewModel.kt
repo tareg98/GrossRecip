@@ -8,6 +8,7 @@ import com.example.grossrecipes.data.ConnectivityObserver
 import com.example.grossrecipes.data.ListsRepository
 import com.example.grossrecipes.data.Session
 import com.example.grossrecipes.data.SessionManager
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +52,16 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         _errorMessage.value = null
     }
 
+    // The live "someone else changed something" listener (see
+    // ListsRepository.listenForSyncSignals) - only ever one running at a
+    // time, tied to actually being online. Held here rather than left to
+    // structured-concurrency cleanup alone, since it needs to be explicitly
+    // cancelled and restarted (not just cancelled once) every time
+    // connectivity flips, and a plain child coroutine launched fresh inside
+    // the collector below would leak a duplicate on every reconnect instead
+    // of replacing the previous one.
+    private var sseJob: Job? = null
+
     init {
         // ConnectivityObserver reports the CURRENT connectivity state the
         // instant it's collected (not just future changes), so this alone
@@ -61,9 +72,22 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         // same full-history sync twice in a row.
         viewModelScope.launch {
             connectivityObserver.observe().distinctUntilChanged().collect { online ->
+                sseJob?.cancel()
+                sseJob = null
                 if (online) {
                     withLoggedInSession { serverUrl, accessToken ->
                         repository.syncPendingChanges(serverUrl, accessToken)
+                    }
+                    // Separate child coroutine, not awaited inline here -
+                    // listenForSyncSignals runs until cancelled (it's the
+                    // reconnect loop itself), so awaiting it inline would
+                    // block this collector from ever seeing the next
+                    // connectivity change.
+                    val session = sessionManager.currentSession()
+                    if (session.isLoggedIn) {
+                        sseJob = viewModelScope.launch {
+                            repository.listenForSyncSignals(session.serverUrl, session.accessToken!!)
+                        }
                     }
                 }
             }
@@ -81,10 +105,10 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun createList(name: String, color: Color?, sharedWithUsername: String) {
+    fun createList(name: String, color: Color?, sharedWithUserId: String) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->
-                repository.createList(serverUrl, accessToken, name, color, sharedWithUsername)
+                repository.createList(serverUrl, accessToken, name, color, sharedWithUserId)
             }
         }
     }
@@ -135,9 +159,9 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Resolves a typed username to their UUID before ShareDialog will let
-     * the user actually add them - see AccountApi.lookupUsername for the
-     * placeholder endpoint/response handling this calls into.
+     * Resolves a typed username to their UUID before ShareDialog (or
+     * NewListDialog's share-on-create field) will let the user actually add
+     * them - see AccountApi.lookupUsername.
      */
     suspend fun lookupUsername(username: String): Result<String?> {
         val session = sessionManager.currentSession()
@@ -147,18 +171,27 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         return com.example.grossrecipes.data.lookupUsername(session.serverUrl, session.accessToken, username)
     }
 
-    fun shareList(listId: String, username: String) {
+    /** The reverse - resolves a UUID back to its username, for ShareDialog's "shared with" pills. */
+    suspend fun lookupUserId(userId: String): Result<String?> {
+        val session = sessionManager.currentSession()
+        if (!session.isLoggedIn || session.accessToken == null) {
+            return Result.failure(Exception("Not logged in"))
+        }
+        return com.example.grossrecipes.data.lookupUserId(session.serverUrl, session.accessToken, userId)
+    }
+
+    fun shareList(listId: String, userId: String) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->
-                repository.shareList(serverUrl, accessToken, listId, username)
+                repository.shareList(serverUrl, accessToken, listId, userId)
             }
         }
     }
 
-    fun unshareList(listId: String, username: String) {
+    fun unshareList(listId: String, userId: String) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->
-                repository.unshareList(serverUrl, accessToken, listId, username)
+                repository.unshareList(serverUrl, accessToken, listId, userId)
             }
         }
     }

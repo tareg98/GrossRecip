@@ -8,7 +8,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -237,8 +237,9 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
     if (showNewListDialog) {
         NewListDialog(
             onDismiss = { showNewListDialog = false },
-            onCreate = { name, color, sharedUsername ->
-                viewModel.createList(name, color, sharedUsername)
+            onLookupUsername = { typed -> viewModel.lookupUsername(typed) },
+            onCreate = { name, color, sharedWithUserId ->
+                viewModel.createList(name, color, sharedWithUserId)
                 showNewListDialog = false
             }
         )
@@ -250,13 +251,13 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
             list = shareDialogList,
             onDismiss = { shareDialogListId = null },
             onLookupUsername = { typed -> viewModel.lookupUsername(typed) },
-            // The resolved userId isn't wired into the share event itself
-            // yet - ListShared (gross-recipes-common) only carries a
-            // username - so it's just proof the typed name is a real
-            // account before we bother sharing at all. Only the username
-            // goes to the existing share call below.
-            onShare = { username, _ -> viewModel.shareList(shareDialogList.id, username) },
-            onUnshare = { username -> viewModel.unshareList(shareDialogList.id, username) },
+            onLookupUserId = { userId -> viewModel.lookupUserId(userId) },
+            // ListShared now carries the recipient's userId, not their
+            // username (see ListsRepository.shareList) - the username here
+            // is only used to clear the text field / show messages, the
+            // resolved userId is what actually goes to the share call.
+            onShare = { _, userId -> viewModel.shareList(shareDialogList.id, userId) },
+            onUnshare = { userId -> viewModel.unshareList(shareDialogList.id, userId) },
             onSharedExternally = { viewModel.markSharedExternally(shareDialogList.id) }
         )
     }
@@ -665,7 +666,15 @@ private fun UncheckedItemsSection(
                         onDelete = { onDeleteItem(item.id) },
                         onLongPress = { menuGapIndex = index },
                         dragHandleModifier = Modifier.pointerInput(item.id) {
-                            detectDragGesturesAfterLongPress(
+                            // Plain detectDragGestures, not the
+                            // "AfterLongPress" variant - dragging the handle
+                            // now starts moving the item the instant you
+                            // touch and move, no hold-and-wait first. The
+                            // long-press-to-hold behavior stays only on the
+                            // item's name text (see onLongPress below /
+                            // ItemRow's combinedClickable), reserved purely
+                            // for opening the divider menu.
+                            detectDragGestures(
                                 onDragStart = {
                                     draggingIndex = orderedItems.indexOfFirst { it.id == item.id }
                                     dragOffsetPx = 0f
@@ -683,7 +692,7 @@ private fun UncheckedItemsSection(
                                     while (dragOffsetPx > estimatedRowHeightPx / 2 &&
                                         (draggingIndex ?: 0) < orderedItems.lastIndex
                                     ) {
-                                        val from = draggingIndex ?: return@detectDragGesturesAfterLongPress
+                                        val from = draggingIndex ?: return@detectDragGestures
                                         val to = from + 1
                                         orderedItems = orderedItems.toMutableList().apply {
                                             add(to, removeAt(from))
@@ -694,7 +703,7 @@ private fun UncheckedItemsSection(
                                     while (dragOffsetPx < -estimatedRowHeightPx / 2 &&
                                         (draggingIndex ?: 0) > 0
                                     ) {
-                                        val from = draggingIndex ?: return@detectDragGesturesAfterLongPress
+                                        val from = draggingIndex ?: return@detectDragGestures
                                         val to = from - 1
                                         orderedItems = orderedItems.toMutableList().apply {
                                             add(to, removeAt(from))

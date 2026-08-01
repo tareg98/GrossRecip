@@ -45,6 +45,7 @@ import com.example.grossrecipes.data.RecentLogin
 import com.example.grossrecipes.data.SessionManager
 import com.example.grossrecipes.data.createAccountApi
 import com.example.grossrecipes.data.dto.Credentials
+import com.example.grossrecipes.data.lookupUsername
 import com.example.grossrecipes.data.parseAuthResponse
 import com.example.grossrecipes.ui.theme.Accent
 import com.example.grossrecipes.ui.theme.Accent2
@@ -196,9 +197,21 @@ fun LoginScreen(onLoginSuccess: () -> Unit, onNavigateToSignUp: () -> Unit) {
                         val response = api.login(Credentials(username, password))
                         when (val outcome = parseAuthResponse(response)) {
                             is AuthOutcome.Success -> {
+                                // Resolve our own UUID now, while we know our
+                                // own username for certain - ListShared/
+                                // ListUnshared events carry a userId (see
+                                // ListsRepository.shareList), so the app
+                                // needs to know "my own id" to tell whether
+                                // one of those events is about me. Best
+                                // effort: if this lookup fails, still finish
+                                // logging in with an empty userId rather than
+                                // blocking on it.
+                                val myUserId = lookupUsername(serverUrl, outcome.accessToken, username)
+                                    .getOrNull().orEmpty()
                                 sessionManager.saveLogin(
                                     serverUrl = serverUrl,
                                     username = username,
+                                    userId = myUserId,
                                     accessToken = outcome.accessToken,
                                     refreshToken = outcome.refreshToken
                                 )

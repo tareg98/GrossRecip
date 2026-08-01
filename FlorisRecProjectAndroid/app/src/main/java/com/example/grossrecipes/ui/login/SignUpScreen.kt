@@ -195,11 +195,10 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
                         // doing a login. This blocks that case client-side
                         // regardless of what register itself does, by
                         // refusing to even call it once the username's
-                        // confirmed to already exist. (Lookup endpoint isn't
-                        // confirmed with the backend yet - if it errors or
-                        // isn't implemented, this just falls through to the
-                        // normal register attempt below rather than blocking
-                        // sign-up entirely.)
+                        // confirmed to already exist. If the lookup call
+                        // itself errors, this falls through to the normal
+                        // register attempt below rather than blocking
+                        // sign-up entirely.
                         val existing = lookupUsername(serverUrl, username = username).getOrNull()
                         if (existing != null) {
                             errorMessage = "An account with that username already exists. Log in instead."
@@ -210,9 +209,16 @@ fun SignUpScreen(onSignUpSuccess: () -> Unit, onNavigateToLogin: () -> Unit) {
                         val response = api.register(Credentials(username, password))
                         when (val outcome = parseAuthResponse(response)) {
                             is AuthOutcome.Success -> {
+                                // Same reasoning as LoginScreen - resolve our
+                                // own UUID now so ListShared/ListUnshared
+                                // events (which carry a userId) can be
+                                // recognized as being about "me" later.
+                                val myUserId = lookupUsername(serverUrl, outcome.accessToken, username)
+                                    .getOrNull().orEmpty()
                                 sessionManager.saveLogin(
                                     serverUrl = serverUrl,
                                     username = username,
+                                    userId = myUserId,
                                     accessToken = outcome.accessToken,
                                     refreshToken = outcome.refreshToken
                                 )

@@ -31,13 +31,15 @@ interface AccountApi {
     @POST("Account/refresh")
     suspend fun refresh(): Response<ResponseBody>
 
-    // PLACEHOLDER - path/method not confirmed with the backend yet. Meant to
-    // resolve a typed username to that user's UUID before sharing, replying
-    // either with the UUID or some "not found" shape. Whatever the real
-    // contract turns out to be, only this one declaration (and the response
-    // parsing in lookupUsername below) should need to change.
-    @GET("Account/lookup/{username}")
+    // Resolves a typed username to that user's UUID before sharing, so we
+    // can validate the recipient exists before ever sending a share event.
+    @GET("Account/lookup-by-username/{username}")
     suspend fun lookupUsername(@Path("username") username: String): Response<ResponseBody>
+
+    // The reverse - resolves a UUID back to its username, for displaying
+    // "shared with" lists as readable names instead of raw UUIDs.
+    @GET("Account/lookup-by-id/{id}")
+    suspend fun lookupUserId(@Path("id") id: String): Response<ResponseBody>
 }
 
 /** What happened when we tried to log in or sign up - both endpoints reply the same shape. */
@@ -151,10 +153,8 @@ fun createAccountApi(serverUrl: String, accessToken: String? = null): AccountApi
  * `Result.success(uuid)` if found, `Result.success(null)` if the username
  * doesn't exist, `Result.failure` only for an actual network/server problem.
  *
- * The exact "not found" shape isn't confirmed with the backend yet, so this
- * defensively covers the two most likely conventions - a 404, or a 200 with
- * an empty/blank/"null" body - until we hear back. Once the real contract is
- * known, only this function's body should need updating.
+ * Covers both a 404 and a 200 with an empty/blank/"null" body as "not
+ * found", since it's not certain which one the backend actually uses.
  */
 suspend fun lookupUsername(serverUrl: String, accessToken: String? = null, username: String): Result<String?> {
     return try {
@@ -170,6 +170,33 @@ suspend fun lookupUsername(serverUrl: String, accessToken: String? = null, usern
                     // Body might come back as a raw UUID or a JSON-quoted
                     // string ("\"...\"") depending on how the endpoint
                     // serializes a plain string - strip quotes either way.
+                    Result.success(bodyText.removeSurrounding("\""))
+                }
+            }
+            else -> Result.failure(Exception("Lookup failed: HTTP ${response.code()}"))
+        }
+    } catch (e: Exception) {
+        Result.failure(Exception("Lookup failed: ${e.message ?: e.javaClass.simpleName}"))
+    }
+}
+
+/**
+ * The reverse of [lookupUsername] - resolves a UUID back to its username.
+ * Not wired into any screen yet; the "shared with" list in [ShareDialog]
+ * still shows raw UUIDs. Adding it here now that the endpoint exists, ready
+ * for whenever that display gets upgraded to show real names.
+ */
+suspend fun lookupUserId(serverUrl: String, accessToken: String? = null, userId: String): Result<String?> {
+    return try {
+        val api = createAccountApi(serverUrl, accessToken)
+        val response = api.lookupUserId(userId)
+        when {
+            response.code() == 404 -> Result.success(null)
+            response.isSuccessful -> {
+                val bodyText = response.body()?.string()?.trim().orEmpty()
+                if (bodyText.isBlank() || bodyText.equals("null", ignoreCase = true)) {
+                    Result.success(null)
+                } else {
                     Result.success(bodyText.removeSurrounding("\""))
                 }
             }

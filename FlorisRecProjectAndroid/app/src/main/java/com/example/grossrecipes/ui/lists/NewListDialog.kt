@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -25,7 +26,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,12 +48,46 @@ import com.example.grossrecipes.ui.theme.Surface
 @Composable
 fun NewListDialog(
     onDismiss: () -> Unit,
-    onCreate: (name: String, color: Color?, sharedUsername: String) -> Unit
+    onLookupUsername: suspend (String) -> Result<String?>,
+    onCreate: (name: String, color: Color?, sharedWithUserId: String) -> Unit
 ) {
     var name by remember { mutableStateOf("") }
     var selectedColor by remember { mutableStateOf<Color?>(null) }
     var shareChecked by remember { mutableStateOf(false) }
     var shareUsername by remember { mutableStateOf("") }
+    var isLookingUp by remember { mutableStateOf(false) }
+    var lookupError by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+
+    // Same reasoning as ShareDialog.submitUsername - ListCreated's
+    // sharedWith needs a real UUID (see ListsRepository.createList), not
+    // whatever text was typed, so this resolves it against the backend
+    // before Create is allowed to actually fire.
+    val submitCreate = {
+        val typed = shareUsername.trim()
+        if (!shareChecked || typed.isBlank()) {
+            onCreate(name, selectedColor, "")
+        } else if (!isLookingUp) {
+            isLookingUp = true
+            lookupError = null
+            coroutineScope.launch {
+                onLookupUsername(typed).fold(
+                    onSuccess = { userId ->
+                        isLookingUp = false
+                        if (userId == null) {
+                            lookupError = "No user found with that username"
+                        } else {
+                            onCreate(name, selectedColor, userId)
+                        }
+                    },
+                    onFailure = { e ->
+                        isLookingUp = false
+                        lookupError = e.message ?: "Lookup failed"
+                    }
+                )
+            }
+        }
+    }
 
     Dialog(onDismissRequest = onDismiss) {
         Column(
@@ -114,12 +151,25 @@ fun NewListDialog(
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = shareUsername,
-                    onValueChange = { shareUsername = it },
+                    onValueChange = {
+                        shareUsername = it
+                        lookupError = null
+                    },
                     placeholder = { Text("Share with (username)") },
                     singleLine = true,
+                    enabled = !isLookingUp,
+                    isError = lookupError != null,
                     shape = PillShape,
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (lookupError != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = lookupError!!,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
             }
 
             Spacer(Modifier.height(20.dp))
@@ -129,15 +179,23 @@ fun NewListDialog(
                 }
                 Spacer(Modifier.width(10.dp))
                 Button(
-                    onClick = { onCreate(name, selectedColor, if (shareChecked) shareUsername else "") },
-                    enabled = name.isNotBlank(),
+                    onClick = { submitCreate() },
+                    enabled = name.isNotBlank() && !isLookingUp,
                     shape = PillShape,
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Accent,
                         disabledContainerColor = Accent.copy(alpha = 0.45f)
                     )
                 ) {
-                    Text("Create")
+                    if (isLookingUp) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            color = Surface,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Create")
+                    }
                 }
             }
         }

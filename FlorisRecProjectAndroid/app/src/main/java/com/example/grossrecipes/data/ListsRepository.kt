@@ -31,12 +31,15 @@ import com.sirolf2009.grossrecipes.event.listItem.ListItemDeleted
 import com.sirolf2009.grossrecipes.event.listItem.ListItemRenamed
 import com.sirolf2009.grossrecipes.sync.dto.SyncRequest
 import com.sirolf2009.grossrecipes.sync.dto.SyncResponse
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.time.ZonedDateTime
@@ -145,7 +148,7 @@ class ListsRepository(
         accessToken: String,
         name: String,
         color: Color?,
-        sharedWithUsername: String
+        sharedWithUserId: String
     ): Result<Unit> = syncMutex.withLock {
         val owner = sessionManager.currentSession().username
 
@@ -155,7 +158,7 @@ class ListsRepository(
                 listId = UUID.randomUUID(),
                 name = name,
                 owner = owner,
-                sharedWith = if (sharedWithUsername.isNotBlank()) listOf(sharedWithUsername) else emptyList(),
+                sharedWith = if (sharedWithUserId.isNotBlank()) listOf(sharedWithUserId) else emptyList(),
                 color = color?.toHex()
             )
         )
@@ -203,12 +206,14 @@ class ListsRepository(
             // it's just shared with "deleting" it should only remove it from
             // their own view - modeled as them unsharing themselves, not as a
             // real ListDeleted, so the owner and everyone else keep their copy.
-            val me = sessionManager.currentSession().username
+            val session = sessionManager.currentSession()
             val list = listDao.getById(listId)
-            val event: Event = if (list != null && list.owner == me) {
+            val event: Event = if (list != null && list.owner == session.username) {
                 ListDeleted(ZonedDateTime.now(), UUID.fromString(listId))
             } else {
-                ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), me)
+                // ListUnshared carries a userId (see shareList below), not a
+                // username - session.userId, not session.username.
+                ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), session.userId)
             }
             applyAndQueue(event)
             syncPendingChangesLocked(serverUrl, accessToken)
@@ -228,15 +233,20 @@ class ListsRepository(
             syncPendingChangesLocked(serverUrl, accessToken)
         }
 
-    suspend fun shareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> =
+    // Both of these take the recipient's UUID, not their username - resolved
+    // via lookupUsername in ShareDialog before either of these gets called,
+    // so a share/unshare always identifies "who" the same durable way an
+    // incoming ListShared/ListUnshared from the server does, regardless of
+    // whether that person's username ever changes later.
+    suspend fun shareList(serverUrl: String, accessToken: String, listId: String, userId: String): Result<Unit> =
         syncMutex.withLock {
-            applyAndQueue(ListShared(ZonedDateTime.now(), UUID.fromString(listId), username))
+            applyAndQueue(ListShared(ZonedDateTime.now(), UUID.fromString(listId), userId))
             syncPendingChangesLocked(serverUrl, accessToken)
         }
 
-    suspend fun unshareList(serverUrl: String, accessToken: String, listId: String, username: String): Result<Unit> =
+    suspend fun unshareList(serverUrl: String, accessToken: String, listId: String, userId: String): Result<Unit> =
         syncMutex.withLock {
-            applyAndQueue(ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), username))
+            applyAndQueue(ListUnshared(ZonedDateTime.now(), UUID.fromString(listId), userId))
             syncPendingChangesLocked(serverUrl, accessToken)
         }
 
@@ -312,6 +322,34 @@ class ListsRepository(
     suspend fun syncPendingChanges(serverUrl: String, accessToken: String): Result<Unit> =
         syncMutex.withLock { syncPendingChangesLocked(serverUrl, accessToken) }
 
+    /**
+     * Keeps a live connection open to the server's Events/notify SSE stream
+     * (see [observeSyncSignal]) and runs a normal sync every time it reports
+     * something changed - catches another device's edits within moments
+     * instead of only the next time this one happens to reconnect or the app
+     * gets reopened. Runs until the calling coroutine is cancelled (see
+     * ListsViewModel, which ties this to "online and logged in").
+     *
+     * A dropped connection, a server error, or the stream simply ending all
+     * look the same from here: [observeSyncSignal]'s Flow just completes.
+     * Rather than give up on live sync entirely, this waits a few seconds
+     * and reconnects - short enough to feel responsive again quickly, long
+     * enough that a server hiccup doesn't spin this in a tight reconnect loop.
+     */
+    suspend fun listenForSyncSignals(serverUrl: String, accessToken: String) {
+        while (currentCoroutineContext().isActive) {
+            try {
+                observeSyncSignal(serverUrl, accessToken, sessionManager).collect {
+                    syncMutex.withLock { syncPendingChangesLocked(serverUrl, accessToken) }
+                }
+            } catch (e: Exception) {
+                // Connection dropped or failed - fall through to the delay
+                // below and try again rather than staying disconnected.
+            }
+            delay(5000)
+        }
+    }
+
     /** Same as [syncPendingChanges] but assumes the caller already holds [syncMutex] - never call this directly. */
     private suspend fun syncPendingChangesLocked(serverUrl: String, accessToken: String): Result<Unit> {
         _isSyncing.value = true
@@ -329,8 +367,30 @@ class ListsRepository(
         }
     }
 
+    /**
+     * Self-heals a session that doesn't know its own userId yet - either an
+     * existing login from before ListShared/ListUnshared switched to
+     * carrying a userId instead of a username (see shareList), or a login
+     * where the one-time self-lookup happened to fail right after signing
+     * in. Runs at the top of every sync (cheap no-op once resolved, since
+     * it checks the stored value first) rather than only at login, so an
+     * old session heals itself the next time it's online instead of staying
+     * broken until the user thinks to log out and back in.
+     */
+    private suspend fun ensureMyUserIdKnown() {
+        val session = sessionManager.currentSession()
+        val accessToken = session.accessToken
+        if (session.userId.isNotBlank() || session.username.isBlank() || accessToken == null) return
+        runCatching {
+            lookupUsername(session.serverUrl, accessToken, session.username).getOrNull()
+        }.getOrNull()?.let { resolvedId ->
+            sessionManager.saveUserId(resolvedId)
+        }
+    }
+
     private suspend fun syncPendingChangesInner(serverUrl: String, accessToken: String): Result<Unit> {
         return try {
+            ensureMyUserIdKnown()
             val client = api(serverUrl, accessToken)
 
             val outbox = outboxEventDao.getAll()
@@ -490,7 +550,9 @@ class ListsRepository(
                 }
             }
             is ListUnshared -> {
-                val me = sessionManager.currentSession().username
+                // event.unsharedWith is a userId now (see shareList/
+                // unshareList above), not a username.
+                val me = sessionManager.currentSession().userId
                 if (event.unsharedWith == me) {
                     // I'm the one being removed - this list is no longer mine
                     // to see at all (this is also how a non-owner's "delete"
