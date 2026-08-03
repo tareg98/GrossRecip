@@ -52,10 +52,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.ui.Alignment
@@ -204,6 +204,7 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                         },
                         onShareClick = { shareDialogListId = list.id },
                         onToggleDivider = { gapIndex -> viewModel.toggleDivider(list.id, gapIndex) },
+                        onDividerMoved = { from, to -> viewModel.moveDivider(list.id, from, to) },
                         onReorderItems = { orderedItemIds -> viewModel.reorderItems(orderedItemIds) }
                     )
                 }
@@ -317,6 +318,7 @@ private fun ListCard(
     onToggleCheckedSectionExpanded: () -> Unit,
     onShareClick: () -> Unit,
     onToggleDivider: (gapIndex: Int) -> Unit,
+    onDividerMoved: (fromGapIndex: Int, toGapIndex: Int) -> Unit,
     onReorderItems: (orderedItemIds: List<String>) -> Unit
 ) {
     val cardBg = list.color?.let { lerp(Surface, it, 0.22f) } ?: Surface
@@ -381,6 +383,7 @@ private fun ListCard(
                 onToggleChecked = onToggleChecked,
                 onDeleteItem = onDeleteItem,
                 onToggleDivider = onToggleDivider,
+                onDividerMoved = onDividerMoved,
                 onReorderItems = onReorderItems
             )
         }
@@ -562,7 +565,8 @@ private fun AddItemField(fieldBg: Color, knownItemNames: List<String>, onAddItem
  * adjacent items to toggle a divider there, a long-press on an item's name
  * for a divider menu (the discoverable fallback for the pinch), and a
  * dedicated drag handle to move an item to any position - hold and drag it
- * up or down past its neighbors.
+ * up or down past its neighbors, carrying any divider it crosses along with
+ * it (see the onDrag comments below for exactly what "carrying" means).
  *
  * Gap `i` (0..items.lastIndex) is the space right above items[i] - gap 0 is
  * the very top of the list, gap i>0 is between items[i - 1] and items[i].
@@ -576,6 +580,7 @@ private fun UncheckedItemsSection(
     onToggleChecked: (String, Boolean) -> Unit,
     onDeleteItem: (String) -> Unit,
     onToggleDivider: (gapIndex: Int) -> Unit,
+    onDividerMoved: (fromGapIndex: Int, toGapIndex: Int) -> Unit,
     onReorderItems: (orderedItemIds: List<String>) -> Unit
 ) {
     // Local drag order - same pattern as ListsScreen's whole-list reordering:
@@ -592,6 +597,23 @@ private fun UncheckedItemsSection(
         if (draggingIndex == null) orderedItems = items
     }
 
+    // Same idea, local copy of the divider positions - a plain
+    // SnapshotStateList (not wrapped in a Set) because, unlike orderedItems,
+    // individual entries get mutated IN PLACE by index while dragging (see
+    // onDrag below) rather than replaced wholesale, and a list's stable
+    // per-slot identity is what makes that possible: workingDividers[i]
+    // means the same "i-th divider" for the whole gesture even as its VALUE
+    // (which gap it's at) changes, which is exactly what dragStartDividers
+    // in onDragEnd relies on to know what moved where.
+    val workingDividers = remember { mutableStateListOf<Int>() }
+    LaunchedEffect(dividerAtGapIndices) {
+        if (draggingIndex == null) {
+            workingDividers.clear()
+            workingDividers.addAll(dividerAtGapIndices)
+        }
+    }
+    var dragStartDividers by remember { mutableStateOf(emptyList<Int>()) }
+
     // Each item row's current top-Y, in this Column's own coordinate space -
     // the same space the pinch gesture's pointer events arrive in - captured
     // live off actual layout so the gesture always lines up with what's on
@@ -600,15 +622,11 @@ private fun UncheckedItemsSection(
     var menuGapIndex by remember { mutableStateOf<Int?>(null) }
     var dragOffsetPx by remember { mutableStateOf(0f) }
 
-    // pointerInput below only restarts when the item ids themselves change
-    // (added/removed) - but dividerAtGapIndices changes on every toggle,
-    // without the id SET changing at all. Without rememberUpdatedState, the
-    // pinch gesture's long-lived coroutine would keep reading whatever this
-    // was the moment it last launched, so a divider toggled via the
-    // long-press menu could look stale to the very next pinch gesture.
-    val currentDividerAtGapIndices = rememberUpdatedState(dividerAtGapIndices)
-
-    fun hasDividerAt(gapIndex: Int): Boolean = gapIndex in currentDividerAtGapIndices.value
+    // workingDividers is itself Compose State (a SnapshotStateList), so
+    // reading it here always sees its live value no matter when this
+    // function was called from - no rememberUpdatedState wrapper needed,
+    // same reasoning as orderedItems above.
+    fun hasDividerAt(gapIndex: Int): Boolean = gapIndex in workingDividers
 
     // A rough, fixed estimate of a row's height rather than something
     // measured live - good enough to decide "has this drag crossed into the
@@ -658,16 +676,21 @@ private fun UncheckedItemsSection(
                         dragHandleModifier = Modifier.pointerInput(item.id) {
                             // Plain detectDragGestures, not the
                             // "AfterLongPress" variant - dragging the handle
-                            // now starts moving the item the instant you
-                            // touch and move, no hold-and-wait first. The
+                            // starts moving the item the instant you touch
+                            // and move, no hold-and-wait first. The
                             // long-press-to-hold behavior stays only on the
-                            // item's name text (see onLongPress below /
+                            // item's name text (see onLongPress above /
                             // ItemRow's combinedClickable), reserved purely
                             // for opening the divider menu.
                             detectDragGestures(
                                 onDragStart = {
                                     draggingIndex = orderedItems.indexOfFirst { it.id == item.id }
                                     dragOffsetPx = 0f
+                                    // Snapshot before any crossing happens -
+                                    // onDragEnd diffs against this, slot by
+                                    // slot, to know which dividers actually
+                                    // moved and need persisting.
+                                    dragStartDividers = workingDividers.toList()
                                 },
                                 onDrag = { change, dragAmount ->
                                     change.consume()
@@ -679,31 +702,61 @@ private fun UncheckedItemsSection(
                                     // each time so the item doesn't visually jump -
                                     // it just keeps tracking the finger smoothly
                                     // across however many rows it passes.
+                                    //
+                                    // If a divider happens to be sitting exactly
+                                    // at the boundary being crossed, the item
+                                    // "carries" it: rather than swapping places
+                                    // with a neighboring item, the divider's own
+                                    // count of items above it shifts by one
+                                    // instead, and the dragged item's own index
+                                    // doesn't change (it doesn't need to - the
+                                    // divider moving past it is what makes it
+                                    // look like it crossed sides). The `!contains`
+                                    // guard just avoids ever putting two dividers
+                                    // in the same gap, which the database would
+                                    // reject anyway - falls back to a plain item
+                                    // swap in that rare case.
                                     while (dragOffsetPx > estimatedRowHeightPx / 2 &&
                                         (draggingIndex ?: 0) < orderedItems.lastIndex
                                     ) {
                                         val from = draggingIndex ?: return@detectDragGestures
-                                        val to = from + 1
-                                        orderedItems = orderedItems.toMutableList().apply {
-                                            add(to, removeAt(from))
+                                        val boundary = from + 1
+                                        val dividerSlot = workingDividers.indexOf(boundary)
+                                        if (dividerSlot != -1 && !workingDividers.contains(from)) {
+                                            workingDividers[dividerSlot] = from
+                                        } else {
+                                            orderedItems = orderedItems.toMutableList().apply {
+                                                add(boundary, removeAt(from))
+                                            }
+                                            draggingIndex = boundary
                                         }
-                                        draggingIndex = to
                                         dragOffsetPx -= estimatedRowHeightPx
                                     }
                                     while (dragOffsetPx < -estimatedRowHeightPx / 2 &&
                                         (draggingIndex ?: 0) > 0
                                     ) {
                                         val from = draggingIndex ?: return@detectDragGestures
-                                        val to = from - 1
-                                        orderedItems = orderedItems.toMutableList().apply {
-                                            add(to, removeAt(from))
+                                        val dividerSlot = workingDividers.indexOf(from)
+                                        if (dividerSlot != -1 && !workingDividers.contains(from + 1)) {
+                                            workingDividers[dividerSlot] = from + 1
+                                        } else {
+                                            val to = from - 1
+                                            orderedItems = orderedItems.toMutableList().apply {
+                                                add(to, removeAt(from))
+                                            }
+                                            draggingIndex = to
                                         }
-                                        draggingIndex = to
                                         dragOffsetPx += estimatedRowHeightPx
                                     }
                                 },
                                 onDragEnd = {
                                     onReorderItems(orderedItems.map { it.id })
+                                    dragStartDividers.forEachIndexed { slot, original ->
+                                        val moved = workingDividers.getOrNull(slot)
+                                        if (moved != null && moved != original) {
+                                            onDividerMoved(original, moved)
+                                        }
+                                    }
                                     draggingIndex = null
                                     dragOffsetPx = 0f
                                 },
@@ -712,6 +765,8 @@ private fun UncheckedItemsSection(
                                     // back to the real order next recomposition
                                     // via the LaunchedEffect(items) above.
                                     orderedItems = items
+                                    workingDividers.clear()
+                                    workingDividers.addAll(dividerAtGapIndices)
                                     draggingIndex = null
                                     dragOffsetPx = 0f
                                 }

@@ -214,14 +214,14 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.updateItemSortOrder(orderedItemIds) }
     }
 
-    /**
-     * Toggles a divider at a raw gap position in the list (0 = above the
-     * first item, 1 = between the 1st and 2nd, etc.) - see DividerEntity's
-     * doc for why it's a position, not an item reference. Purely local, like
-     * [reorderLists] - never syncs anywhere.
-     */
+    /** Toggles whether a divider sits at this gap - see ListsRepository.toggleDivider. Purely local - never syncs anywhere. */
     fun toggleDivider(listId: String, gapIndex: Int) {
         viewModelScope.launch { repository.toggleDivider(listId, gapIndex) }
+    }
+
+    /** Carries a divider along when a drag crosses it - see ListsRepository.moveDivider. Purely local - never syncs anywhere. */
+    fun moveDivider(listId: String, fromGapIndex: Int, toGapIndex: Int) {
+        viewModelScope.launch { repository.moveDivider(listId, fromGapIndex, toGapIndex) }
     }
 
     // Every action function's lambda already ends with a repository call that

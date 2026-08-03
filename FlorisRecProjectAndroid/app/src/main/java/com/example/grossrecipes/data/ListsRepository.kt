@@ -291,9 +291,7 @@ class ListsRepository(
      * Purely local, like [setCheckedSectionExpandedLocalOnly] and
      * [updateSortOrder] - a divider is a personal organizational aid, not
      * something gross-recipes-common has any concept of, so it never becomes
-     * an event and never syncs. [gapIndex] is a raw position (0 = above the
-     * first item, 1 = between the 1st and 2nd, etc.) - see DividerEntity's
-     * doc for why this is anchored to a position rather than an item.
+     * an event and never syncs.
      */
     suspend fun toggleDivider(listId: String, gapIndex: Int) {
         val existing = dividerDao.getAt(listId, gapIndex)
@@ -301,6 +299,23 @@ class ListsRepository(
             dividerDao.deleteAt(listId, gapIndex)
         } else {
             dividerDao.upsert(DividerEntity(id = UUID.randomUUID().toString(), listId = listId, gapIndex = gapIndex))
+        }
+    }
+
+    /**
+     * Moves an already-placed divider from one gap to another - this is what
+     * lets dragging an item carry it across a divider (see
+     * UncheckedItemsSection's onDrag): the item's own position doesn't
+     * change, the divider's count of "items above it" does. No-ops if
+     * nothing is actually at [fromGapIndex] anymore (e.g. a stale call after
+     * the divider was removed some other way).
+     */
+    suspend fun moveDivider(listId: String, fromGapIndex: Int, toGapIndex: Int) {
+        if (fromGapIndex == toGapIndex) return
+        database.withTransaction {
+            val existing = dividerDao.getAt(listId, fromGapIndex) ?: return@withTransaction
+            dividerDao.deleteAt(listId, fromGapIndex)
+            dividerDao.upsert(existing.copy(gapIndex = toGapIndex))
         }
     }
 
