@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.FloatingActionButton
@@ -74,13 +75,18 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.zIndex
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -205,7 +211,9 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                         onShareClick = { shareDialogListId = list.id },
                         onToggleDivider = { gapIndex -> viewModel.toggleDivider(list.id, gapIndex) },
                         onDividerMoved = { from, to -> viewModel.moveDivider(list.id, from, to) },
-                        onReorderItems = { orderedItemIds -> viewModel.reorderItems(orderedItemIds) }
+                        onReorderItems = { orderedItemIds -> viewModel.reorderItems(orderedItemIds) },
+                        onRenameList = { newName -> viewModel.renameList(list.id, newName) },
+                        onRenameItem = { itemId, newName -> viewModel.renameItem(itemId, newName) }
                     )
                 }
             }
@@ -319,10 +327,20 @@ private fun ListCard(
     onShareClick: () -> Unit,
     onToggleDivider: (gapIndex: Int) -> Unit,
     onDividerMoved: (fromGapIndex: Int, toGapIndex: Int) -> Unit,
-    onReorderItems: (orderedItemIds: List<String>) -> Unit
+    onReorderItems: (orderedItemIds: List<String>) -> Unit,
+    onRenameList: (newName: String) -> Unit,
+    onRenameItem: (itemId: String, newName: String) -> Unit
 ) {
     val cardBg = list.color?.let { lerp(Surface, it, 0.22f) } ?: Surface
     val fieldBg = list.color?.let { lerp(Background, it, 0.10f) } ?: Background
+
+    // Local dialog state, same pattern as ListAvatar's color-picker Popup
+    // right below - these only ever concern this one card, so there's no
+    // reason to lift them up to ListsScreen the way ShareDialog/
+    // NewListDialog are (those need the whole lists list to look a share
+    // target's id back up, or don't belong to any one card at all).
+    var showRenameListDialog by remember { mutableStateOf(false) }
+    var renameItemTarget by remember { mutableStateOf<GroceryItem?>(null) }
 
     Column(
         modifier = Modifier
@@ -354,6 +372,9 @@ private fun ListCard(
                     SharedTag()
                 }
             }
+            IconButton(onClick = { showRenameListDialog = true }) {
+                Icon(Icons.Default.Edit, contentDescription = "Rename list")
+            }
             IconButton(onClick = onShareClick) {
                 Icon(Icons.Default.Share, contentDescription = "Share list")
             }
@@ -384,7 +405,8 @@ private fun ListCard(
                 onDeleteItem = onDeleteItem,
                 onToggleDivider = onToggleDivider,
                 onDividerMoved = onDividerMoved,
-                onReorderItems = onReorderItems
+                onReorderItems = onReorderItems,
+                onRequestRename = { item -> renameItemTarget = item }
             )
         }
 
@@ -395,9 +417,34 @@ private fun ListCard(
                 expanded = list.checkedSectionExpanded,
                 onToggleExpanded = onToggleCheckedSectionExpanded,
                 onToggleChecked = onToggleChecked,
-                onDeleteItem = onDeleteItem
+                onDeleteItem = onDeleteItem,
+                onRequestRename = { item -> renameItemTarget = item }
             )
         }
+    }
+
+    if (showRenameListDialog) {
+        RenameDialog(
+            title = "Rename list",
+            initialName = list.name,
+            onDismiss = { showRenameListDialog = false },
+            onRename = { newName ->
+                onRenameList(newName)
+                showRenameListDialog = false
+            }
+        )
+    }
+
+    renameItemTarget?.let { item ->
+        RenameDialog(
+            title = "Rename item",
+            initialName = item.name,
+            onDismiss = { renameItemTarget = null },
+            onRename = { newName ->
+                onRenameItem(item.id, newName)
+                renameItemTarget = null
+            }
+        )
     }
 }
 
@@ -581,7 +628,8 @@ private fun UncheckedItemsSection(
     onDeleteItem: (String) -> Unit,
     onToggleDivider: (gapIndex: Int) -> Unit,
     onDividerMoved: (fromGapIndex: Int, toGapIndex: Int) -> Unit,
-    onReorderItems: (orderedItemIds: List<String>) -> Unit
+    onReorderItems: (orderedItemIds: List<String>) -> Unit,
+    onRequestRename: (GroceryItem) -> Unit
 ) {
     // Local drag order - same pattern as ListsScreen's whole-list reordering:
     // reorder this copy instantly for a smooth visual while dragging, push
@@ -619,6 +667,15 @@ private fun UncheckedItemsSection(
     // live off actual layout so the gesture always lines up with what's on
     // screen, even as dividers add or remove rows above a given item.
     val gapPositions = remember { mutableStateMapOf<Int, Float>() }
+    // The same rows' positions again, but in WINDOW coordinates this time -
+    // Popup below positions itself in window space (via a custom
+    // popupPositionProvider), not in this Column's local space, so reusing
+    // gapPositions there would be off by however far this Column itself
+    // sits from the top of the window (the list's avatar row + AddItemField
+    // above it) - which is exactly the "too far / should be lower" bug:
+    // the menu was landing near the top of the card instead of next to the
+    // item that was actually long-pressed.
+    val gapWindowPositions = remember { mutableStateMapOf<Int, Offset>() }
     var menuGapIndex by remember { mutableStateOf<Int?>(null) }
     var dragOffsetPx by remember { mutableStateOf(0f) }
 
@@ -663,6 +720,7 @@ private fun UncheckedItemsSection(
                     modifier = Modifier
                         .onGloballyPositioned { coordinates ->
                             gapPositions[index] = coordinates.positionInParent().y
+                            gapWindowPositions[index] = coordinates.positionInWindow()
                         }
                         .zIndex(if (isDragging) 1f else 0f)
                         .offset { IntOffset(0, if (isDragging) dragOffsetPx.roundToInt() else 0) }
@@ -672,6 +730,7 @@ private fun UncheckedItemsSection(
                         checkedStyle = false,
                         onToggleChecked = { onToggleChecked(item.id, !item.checked) },
                         onDelete = { onDeleteItem(item.id) },
+                        onRename = { onRequestRename(item) },
                         onLongPress = { menuGapIndex = index },
                         dragHandleModifier = Modifier.pointerInput(item.id) {
                             // Plain detectDragGestures, not the
@@ -802,16 +861,30 @@ private fun UncheckedItemsSection(
     val gapIndex = menuGapIndex
     if (gapIndex != null) {
         val exists = hasDividerAt(gapIndex)
-        // Without an explicit alignment/offset, Popup anchors itself to the
-        // top-left of the whole card instead of the gap you actually
-        // long-pressed on - which is why it was showing up on top of the
-        // card's header row instead of next to the item you were touching.
-        // gapPositions already tracks each item's real on-screen Y (recorded
-        // for the pinch gesture), so reuse it here to land the menu in the
-        // right spot.
+        // A plain alignment+offset Popup anchors itself to wherever THIS
+        // composable happens to sit in the tree - which turned out to be
+        // this whole card, not the items Column inside it, so the offset
+        // (measured relative to the items Column) landed the menu too high,
+        // short by however tall the avatar row + AddItemField above the
+        // items are. A custom popupPositionProvider sidesteps guessing at
+        // Compose's anchor entirely: gapWindowPositions already has this
+        // item's real on-screen position in window coordinates (recorded
+        // alongside gapPositions), so just place the popup exactly there.
+        val anchorPosition = gapWindowPositions[gapIndex]
         Popup(
-            alignment = Alignment.TopStart,
-            offset = IntOffset(0, gapPositions[gapIndex]?.roundToInt() ?: 0),
+            popupPositionProvider = remember(anchorPosition) {
+                object : PopupPositionProvider {
+                    override fun calculatePosition(
+                        anchorBounds: IntRect,
+                        windowSize: IntSize,
+                        layoutDirection: LayoutDirection,
+                        popupContentSize: IntSize
+                    ): IntOffset = IntOffset(
+                        anchorPosition?.x?.roundToInt() ?: anchorBounds.left,
+                        anchorPosition?.y?.roundToInt() ?: anchorBounds.top
+                    )
+                }
+            },
             onDismissRequest = { menuGapIndex = null }
         ) {
             Box(
@@ -923,6 +996,7 @@ private fun ItemRow(
     checkedStyle: Boolean,
     onToggleChecked: () -> Unit,
     onDelete: () -> Unit,
+    onRename: () -> Unit,
     onLongPress: (() -> Unit)? = null,
     dragHandleModifier: Modifier? = null
 ) {
@@ -961,17 +1035,20 @@ private fun ItemRow(
             modifier = Modifier
                 .weight(1f)
                 .then(
+                    // Tapping the name renames it either way - the
+                    // long-press-for-divider-menu behavior only applies to
+                    // unchecked items (onLongPress is only ever passed for
+                    // those), so it rides along on the same combinedClickable
+                    // there instead of a plain clickable.
                     if (onLongPress != null) {
-                        Modifier.combinedClickable(onClick = {}, onLongClick = onLongPress)
+                        Modifier.combinedClickable(onClick = onRename, onLongClick = onLongPress)
                     } else {
-                        Modifier
+                        Modifier.clickable(onClick = onRename)
                     }
                 )
         )
-        if (!checkedStyle) {
-            IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
-                Icon(Icons.Default.Close, contentDescription = "Delete item", modifier = Modifier.size(16.dp))
-            }
+        IconButton(onClick = onDelete, modifier = Modifier.size(28.dp)) {
+            Icon(Icons.Default.Close, contentDescription = "Delete item", modifier = Modifier.size(16.dp))
         }
         if (dragHandleModifier != null) {
             Icon(
@@ -992,7 +1069,8 @@ private fun CheckedSection(
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
     onToggleChecked: (String, Boolean) -> Unit,
-    onDeleteItem: (String) -> Unit
+    onDeleteItem: (String) -> Unit,
+    onRequestRename: (GroceryItem) -> Unit
 ) {
     val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevronRotation")
 
@@ -1022,7 +1100,8 @@ private fun CheckedSection(
                     item = item,
                     checkedStyle = true,
                     onToggleChecked = { onToggleChecked(item.id, !item.checked) },
-                    onDelete = { onDeleteItem(item.id) }
+                    onDelete = { onDeleteItem(item.id) },
+                    onRename = { onRequestRename(item) }
                 )
             }
         }

@@ -199,6 +199,21 @@ class ListsRepository(
             syncPendingChangesLocked(serverUrl, accessToken)
         }
 
+    suspend fun renameItem(serverUrl: String, accessToken: String, itemId: String, name: String): Result<Unit> =
+        syncMutex.withLock {
+            val item = listItemDao.getById(itemId)
+                ?: return@withLock Result.failure(Exception("Item not found locally: $itemId"))
+            val trimmedName = name.trim()
+            applyAndQueue(ListItemRenamed(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId), trimmedName))
+            // Same reasoning as ListItemCreated's applyEvent handler - a
+            // renamed item's new name should suggest itself in autocomplete
+            // too, not just names given at creation time.
+            knownItemNameDao.insertIfAbsent(
+                KnownItemNameEntity(normalizedName = trimmedName.lowercase(), displayName = trimmedName)
+            )
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
+
     suspend fun deleteList(serverUrl: String, accessToken: String, listId: String): Result<Unit> =
         syncMutex.withLock {
             // Only the owner's delete should remove the list for everyone. Anyone
@@ -229,6 +244,12 @@ class ListsRepository(
     suspend fun setColor(serverUrl: String, accessToken: String, listId: String, color: Color?): Result<Unit> =
         syncMutex.withLock {
             applyAndQueue(ListRecolored(ZonedDateTime.now(), UUID.fromString(listId), color?.toHex()))
+            syncPendingChangesLocked(serverUrl, accessToken)
+        }
+
+    suspend fun renameList(serverUrl: String, accessToken: String, listId: String, name: String): Result<Unit> =
+        syncMutex.withLock {
+            applyAndQueue(ListRenamed(ZonedDateTime.now(), UUID.fromString(listId), name.trim()))
             syncPendingChangesLocked(serverUrl, accessToken)
         }
 

@@ -129,6 +129,14 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun renameItem(itemId: String, name: String) {
+        viewModelScope.launch {
+            withLoggedInSession { serverUrl, accessToken ->
+                repository.renameItem(serverUrl, accessToken, itemId, name)
+            }
+        }
+    }
+
     fun deleteList(listId: String) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->
@@ -149,6 +157,14 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             withLoggedInSession { serverUrl, accessToken ->
                 repository.setColor(serverUrl, accessToken, listId, color)
+            }
+        }
+    }
+
+    fun renameList(listId: String, name: String) {
+        viewModelScope.launch {
+            withLoggedInSession { serverUrl, accessToken ->
+                repository.renameList(serverUrl, accessToken, listId, name)
             }
         }
     }
