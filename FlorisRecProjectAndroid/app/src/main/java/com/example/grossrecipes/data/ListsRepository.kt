@@ -120,8 +120,7 @@ class ListsRepository(
                 val listDividers = dividers.filter { it.listId == list.id }
                 list.toDomain(
                     items = items.filter { it.listId == list.id },
-                    topDivider = listDividers.any { it.afterItemId == null },
-                    dividerAfterItemIds = listDividers.mapNotNull { it.afterItemId }.toSet()
+                    dividerAtGapIndices = listDividers.map { it.gapIndex }.toSet()
                 )
             }
         }
@@ -292,17 +291,16 @@ class ListsRepository(
      * Purely local, like [setCheckedSectionExpandedLocalOnly] and
      * [updateSortOrder] - a divider is a personal organizational aid, not
      * something gross-recipes-common has any concept of, so it never becomes
-     * an event and never syncs. [afterItemId] null means the very top of the
-     * list; otherwise it's anchored to that item's stable id rather than a
-     * raw position, so it stays attached to the same visual gap as items
-     * above it are added, checked off, or removed.
+     * an event and never syncs. [gapIndex] is a raw position (0 = above the
+     * first item, 1 = between the 1st and 2nd, etc.) - see DividerEntity's
+     * doc for why this is anchored to a position rather than an item.
      */
-    suspend fun toggleDivider(listId: String, afterItemId: String?) {
-        val existing = dividerDao.getAt(listId, afterItemId)
+    suspend fun toggleDivider(listId: String, gapIndex: Int) {
+        val existing = dividerDao.getAt(listId, gapIndex)
         if (existing != null) {
-            dividerDao.deleteAt(listId, afterItemId)
+            dividerDao.deleteAt(listId, gapIndex)
         } else {
-            dividerDao.upsert(DividerEntity(id = UUID.randomUUID().toString(), listId = listId, afterItemId = afterItemId))
+            dividerDao.upsert(DividerEntity(id = UUID.randomUUID().toString(), listId = listId, gapIndex = gapIndex))
         }
     }
 
@@ -611,12 +609,11 @@ class ListsRepository(
                 }
             }
             is ListItemDeleted -> {
+                // Dividers are position-anchored now (see DividerEntity), not
+                // tied to any item's id, so deleting an item needs no divider
+                // cleanup here - a divider at, say, gap 2 just keeps meaning
+                // "gap 2", whatever ends up on either side of it.
                 listItemDao.deleteById(event.listItemId.toString())
-                // Any divider anchored to this item (see toggleDivider) would
-                // otherwise be left pointing at a row that no longer exists -
-                // not dangerous, just permanently orphaned, since nothing
-                // would ever match it again.
-                dividerDao.deleteByAnchorItem(event.listItemId.toString())
             }
         }
     }
@@ -649,8 +646,7 @@ class ListsRepository(
 
 private fun ListEntity.toDomain(
     items: List<ListItemEntity>,
-    topDivider: Boolean,
-    dividerAfterItemIds: Set<String>
+    dividerAtGapIndices: Set<Int>
 ): GroceryList = GroceryList(
     id = id,
     name = name,
@@ -659,8 +655,7 @@ private fun ListEntity.toDomain(
     sharedExternally = sharedExternally,
     items = items.map { GroceryItem(id = it.id, name = it.name, checked = it.checked) },
     checkedSectionExpanded = checkedSectionExpanded,
-    topDivider = topDivider,
-    dividerAfterItemIds = dividerAfterItemIds
+    dividerAtGapIndices = dividerAtGapIndices
 )
 
 private fun Color.toHex(): String = String.format("#%08X", this.toArgb())

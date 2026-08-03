@@ -203,7 +203,7 @@ fun ListsScreen(viewModel: ListsViewModel = viewModel()) {
                             viewModel.toggleCheckedSectionExpanded(list.id, !list.checkedSectionExpanded)
                         },
                         onShareClick = { shareDialogListId = list.id },
-                        onToggleDivider = { afterItemId -> viewModel.toggleDivider(list.id, afterItemId) },
+                        onToggleDivider = { gapIndex -> viewModel.toggleDivider(list.id, gapIndex) },
                         onReorderItems = { orderedItemIds -> viewModel.reorderItems(orderedItemIds) }
                     )
                 }
@@ -316,7 +316,7 @@ private fun ListCard(
     onDeleteItem: (String) -> Unit,
     onToggleCheckedSectionExpanded: () -> Unit,
     onShareClick: () -> Unit,
-    onToggleDivider: (afterItemId: String?) -> Unit,
+    onToggleDivider: (gapIndex: Int) -> Unit,
     onReorderItems: (orderedItemIds: List<String>) -> Unit
 ) {
     val cardBg = list.color?.let { lerp(Surface, it, 0.22f) } ?: Surface
@@ -377,8 +377,7 @@ private fun ListCard(
             Spacer(Modifier.height(8.dp))
             UncheckedItemsSection(
                 items = uncheckedItems,
-                topDivider = list.topDivider,
-                dividerAfterItemIds = list.dividerAfterItemIds,
+                dividerAtGapIndices = list.dividerAtGapIndices,
                 onToggleChecked = onToggleChecked,
                 onDeleteItem = onDeleteItem,
                 onToggleDivider = onToggleDivider,
@@ -566,17 +565,17 @@ private fun AddItemField(fieldBg: Color, knownItemNames: List<String>, onAddItem
  * up or down past its neighbors.
  *
  * Gap `i` (0..items.lastIndex) is the space right above items[i] - gap 0 is
- * the very top of the list ([GroceryList.topDivider]), gap i>0 is right
- * after items[i - 1]'s id ([GroceryList.dividerAfterItemIds]).
+ * the very top of the list, gap i>0 is between items[i - 1] and items[i].
+ * See [GroceryList.dividerAtGapIndices] for why this is a raw position
+ * rather than something tied to a specific item.
  */
 @Composable
 private fun UncheckedItemsSection(
     items: List<GroceryItem>,
-    topDivider: Boolean,
-    dividerAfterItemIds: Set<String>,
+    dividerAtGapIndices: Set<Int>,
     onToggleChecked: (String, Boolean) -> Unit,
     onDeleteItem: (String) -> Unit,
-    onToggleDivider: (afterItemId: String?) -> Unit,
+    onToggleDivider: (gapIndex: Int) -> Unit,
     onReorderItems: (orderedItemIds: List<String>) -> Unit
 ) {
     // Local drag order - same pattern as ListsScreen's whole-list reordering:
@@ -602,23 +601,14 @@ private fun UncheckedItemsSection(
     var dragOffsetPx by remember { mutableStateOf(0f) }
 
     // pointerInput below only restarts when the item ids themselves change
-    // (added/removed) - which is correct, since the gaps are tied to item
-    // identity - but topDivider/dividerAfterItemIds change on every toggle,
-    // and orderedItems changes on every drag swap, without the id SET
-    // changing at all. Without rememberUpdatedState, the pinch gesture's
-    // long-lived coroutine would keep reading whatever those values were the
-    // moment it last launched, so a divider toggled via the long-press menu,
-    // or an item just dragged elsewhere, could look stale to the very next
-    // pinch gesture.
-    val currentItems = rememberUpdatedState(orderedItems)
-    val currentTopDivider = rememberUpdatedState(topDivider)
-    val currentDividerAfterItemIds = rememberUpdatedState(dividerAfterItemIds)
+    // (added/removed) - but dividerAtGapIndices changes on every toggle,
+    // without the id SET changing at all. Without rememberUpdatedState, the
+    // pinch gesture's long-lived coroutine would keep reading whatever this
+    // was the moment it last launched, so a divider toggled via the
+    // long-press menu could look stale to the very next pinch gesture.
+    val currentDividerAtGapIndices = rememberUpdatedState(dividerAtGapIndices)
 
-    fun anchorFor(gapIndex: Int): String? =
-        if (gapIndex == 0) null else currentItems.value[gapIndex - 1].id
-    fun hasDividerAt(gapIndex: Int): Boolean =
-        if (gapIndex == 0) currentTopDivider.value
-        else currentDividerAfterItemIds.value.contains(currentItems.value[gapIndex - 1].id)
+    fun hasDividerAt(gapIndex: Int): Boolean = gapIndex in currentDividerAtGapIndices.value
 
     // A rough, fixed estimate of a row's height rather than something
     // measured live - good enough to decide "has this drag crossed into the
@@ -631,7 +621,7 @@ private fun UncheckedItemsSection(
             detectDividerPinch(
                 gapPositions = { gapPositions },
                 hasDividerAt = ::hasDividerAt,
-                onToggle = { gapIndex -> onToggleDivider(anchorFor(gapIndex)) }
+                onToggle = { gapIndex -> onToggleDivider(gapIndex) }
             )
         }
     ) {
@@ -762,7 +752,7 @@ private fun UncheckedItemsSection(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier
                         .clickable {
-                            onToggleDivider(anchorFor(gapIndex))
+                            onToggleDivider(gapIndex)
                             menuGapIndex = null
                         }
                         .padding(horizontal = 16.dp, vertical = 12.dp)

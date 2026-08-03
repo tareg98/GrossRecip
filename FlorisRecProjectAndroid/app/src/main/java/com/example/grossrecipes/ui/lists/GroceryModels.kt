@@ -23,13 +23,12 @@ data class GroceryList(
     val items: List<GroceryItem> = emptyList(),
     val checkedSectionExpanded: Boolean = false,
     // Dividers are a purely local organizational aid - never synced, so each
-    // device can lay a list out differently. topDivider is the one at the
-    // very top (before the first item); everything else is anchored to the
-    // stable id of the item right above it, not a raw index - an index would
-    // silently point at the wrong gap the moment an item above it is added,
-    // checked off, or removed.
-    val topDivider: Boolean = false,
-    val dividerAfterItemIds: Set<String> = emptySet()
+    // device can lay a list out differently. Anchored to a raw gap position
+    // (0 = above the first item, 1 = between the 1st and 2nd, etc.), not to
+    // an item's id - so a divider stays exactly where it was placed as items
+    // get dragged around, added, checked off, or removed, instead of
+    // following whichever item it was originally next to.
+    val dividerAtGapIndices: Set<Int> = emptySet()
 )
 
 val listColorPalette: List<Color> = listOf(Accent, Accent2, ListOchre, ListDustyBlue, ListPlum)

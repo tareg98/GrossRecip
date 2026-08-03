@@ -215,12 +215,13 @@ class ListsViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Toggles a divider at a gap in the list - [afterItemId] null means the
-     * very top, otherwise right after that item. Purely local, like
+     * Toggles a divider at a raw gap position in the list (0 = above the
+     * first item, 1 = between the 1st and 2nd, etc.) - see DividerEntity's
+     * doc for why it's a position, not an item reference. Purely local, like
      * [reorderLists] - never syncs anywhere.
      */
-    fun toggleDivider(listId: String, afterItemId: String?) {
-        viewModelScope.launch { repository.toggleDivider(listId, afterItemId) }
+    fun toggleDivider(listId: String, gapIndex: Int) {
+        viewModelScope.launch { repository.toggleDivider(listId, gapIndex) }
     }
 
     // Every action function's lambda already ends with a repository call that
