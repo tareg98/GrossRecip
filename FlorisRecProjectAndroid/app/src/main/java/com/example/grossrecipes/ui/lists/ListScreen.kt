@@ -751,10 +751,28 @@ private fun UncheckedItemsSection(
                                 },
                                 onDragEnd = {
                                     onReorderItems(orderedItems.map { it.id })
+                                    // A divider that got carried all the way to
+                                    // gapIndex 0 (nothing above it) or all the
+                                    // way to orderedItems.size (nothing below
+                                    // it) isn't separating anything anymore, so
+                                    // it's removed instead of persisted there -
+                                    // onToggleDivider deletes it since it's
+                                    // still sitting at `original` in the
+                                    // database (this drag never touched the DB
+                                    // until now). A divider deliberately placed
+                                    // at one of those same positions via the
+                                    // long-press menu is untouched by this -
+                                    // only a drag pushing it there makes it
+                                    // vanish.
+                                    val itemCount = orderedItems.size
                                     dragStartDividers.forEachIndexed { slot, original ->
                                         val moved = workingDividers.getOrNull(slot)
                                         if (moved != null && moved != original) {
-                                            onDividerMoved(original, moved)
+                                            if (moved == 0 || moved == itemCount) {
+                                                onToggleDivider(original)
+                                            } else {
+                                                onDividerMoved(original, moved)
+                                            }
                                         }
                                     }
                                     draggingIndex = null
