@@ -195,6 +195,18 @@ class ListsRepository(
         syncMutex.withLock {
             val item = listItemDao.getById(itemId)
                 ?: return@withLock Result.failure(Exception("Item not found locally: $itemId"))
+            // Checking an item off removes it from the unchecked list (it's
+            // filtered out into the Checked section); unchecking it puts it
+            // back. Either way, a divider's raw gapIndex needs shifting to
+            // compensate BEFORE the item actually moves, or it'll silently
+            // absorb (or lose) whichever item is now next in line instead of
+            // staying attached to the same items on each side - see the two
+            // helpers below.
+            if (checked && !item.checked) {
+                shiftDividersForRemovalFromUnchecked(item.listId, itemId)
+            } else if (!checked && item.checked) {
+                shiftDividersForInsertionIntoUnchecked(item.listId, itemId)
+            }
             applyAndQueue(ListItemChecked(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId), checked))
             syncPendingChangesLocked(serverUrl, accessToken)
         }
@@ -237,6 +249,14 @@ class ListsRepository(
         syncMutex.withLock {
             val item = listItemDao.getById(itemId)
                 ?: return@withLock Result.failure(Exception("Item not found locally: $itemId"))
+            // Same reasoning as setChecked - deleting an unchecked item also
+            // removes it from the unchecked list, so any divider below it
+            // needs the same shift to stay attached to the same items. A
+            // checked item isn't part of that list in the first place, so
+            // deleting one needs no adjustment.
+            if (!item.checked) {
+                shiftDividersForRemovalFromUnchecked(item.listId, itemId)
+            }
             applyAndQueue(ListItemDeleted(ZonedDateTime.now(), UUID.fromString(item.listId), UUID.fromString(itemId)))
             syncPendingChangesLocked(serverUrl, accessToken)
         }
@@ -337,6 +357,53 @@ class ListsRepository(
             val existing = dividerDao.getAt(listId, fromGapIndex) ?: return@withTransaction
             dividerDao.deleteAt(listId, fromGapIndex)
             dividerDao.upsert(existing.copy(gapIndex = toGapIndex))
+        }
+    }
+
+    /**
+     * A divider's gapIndex is a raw count - "N items above it" - measured
+     * against whatever's CURRENTLY in the unchecked list (see DividerEntity's
+     * doc). That list isn't stable: checking an item off or deleting it
+     * removes it from that list entirely, and unchecking one puts it back.
+     * Without correcting for that, checking off an item above a divider
+     * would silently pull the next item in line up into the "above" group
+     * instead - the divider's count stays right, but the actual items on
+     * each side quietly change, which is exactly the "wrong item moved up"
+     * bug this fixes.
+     *
+     * Call this BEFORE the item's own checked/deleted state actually changes
+     * in the database - it needs to see the unchecked list as it still is,
+     * with this item still in it, to find where it currently sits.
+     */
+    private suspend fun shiftDividersForRemovalFromUnchecked(listId: String, itemId: String) {
+        val uncheckedInOrder = listItemDao.getForList(listId).filter { !it.checked }
+        val position = uncheckedInOrder.indexOfFirst { it.id == itemId }
+        if (position == -1) return
+        database.withTransaction {
+            dividerDao.getAllForList(listId).filter { it.gapIndex > position }.forEach { divider ->
+                dividerDao.deleteAt(listId, divider.gapIndex)
+                dividerDao.upsert(divider.copy(gapIndex = divider.gapIndex - 1))
+            }
+        }
+    }
+
+    /**
+     * The mirror image of [shiftDividersForRemovalFromUnchecked] - unchecking
+     * an item puts it back into the unchecked list at wherever its sortOrder
+     * places it, so any divider that was below where it reappears needs to
+     * grow by one to keep counting the same items above it, now that one
+     * more item sits there. Call this before the item's own checked state
+     * changes, same as the removal case.
+     */
+    private suspend fun shiftDividersForInsertionIntoUnchecked(listId: String, itemId: String) {
+        val allItems = listItemDao.getForList(listId)
+        val thisItem = allItems.firstOrNull { it.id == itemId } ?: return
+        val position = allItems.count { !it.checked && it.sortOrder < thisItem.sortOrder }
+        database.withTransaction {
+            dividerDao.getAllForList(listId).filter { it.gapIndex > position }.forEach { divider ->
+                dividerDao.deleteAt(listId, divider.gapIndex)
+                dividerDao.upsert(divider.copy(gapIndex = divider.gapIndex + 1))
+            }
         }
     }
 

@@ -14,6 +14,10 @@ interface DividerDao {
     @Query("SELECT * FROM dividers WHERE listId = :listId AND gapIndex = :gapIndex LIMIT 1")
     suspend fun getAt(listId: String, gapIndex: Int): DividerEntity?
 
+    /** One-shot (not a Flow) read of every divider for a single list - used to shift them when an item leaves/rejoins the unchecked list. */
+    @Query("SELECT * FROM dividers WHERE listId = :listId")
+    suspend fun getAllForList(listId: String): List<DividerEntity>
+
     @Upsert
     suspend fun upsert(divider: DividerEntity)
 
